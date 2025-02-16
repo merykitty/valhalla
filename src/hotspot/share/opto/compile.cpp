@@ -67,6 +67,7 @@
 #include "opto/movenode.hpp"
 #include "opto/mulnode.hpp"
 #include "opto/narrowptrnode.hpp"
+#include "opto/newobjectnode.hpp"
 #include "opto/node.hpp"
 #include "opto/opcodes.hpp"
 #include "opto/output.hpp"
@@ -402,6 +403,9 @@ void Compile::remove_useless_node(Node* dead) {
   }
   if (dead->for_post_loop_opts_igvn()) {
     remove_from_post_loop_opts_igvn(dead);
+  }
+  if (dead->is_NewObject()) {
+    remove_new_object(dead->as_NewObject());
   }
   if (dead->is_InlineType()) {
     remove_inline_type(dead);
@@ -1939,6 +1943,31 @@ void Compile::process_for_post_loop_opts_igvn(PhaseIterGVN& igvn) {
   }
 }
 
+void Compile::add_new_object(NewObjectNode* n) {
+  assert(!_new_object_nodes.contains(n), "duplicate entry");
+  _new_object_nodes.push(n);
+}
+
+void Compile::remove_new_object(NewObjectNode* n) {
+  _new_object_nodes.remove_if_existing(n);
+}
+
+void Compile::process_new_objects(PhaseIterGVN& igvn) {
+  if (_new_object_nodes.length() == 0) {
+    return;
+  }
+  // Scalarize larval inline types in safepoint debug info.
+  // Delay this until all inlining is over to avoid getting inconsistent debug info.
+  set_scalarize_in_safepoints(true);
+  for (int i = _new_object_nodes.length() - 1; i >= 0; i--) {
+    NewObjectNode* obj = _new_object_nodes.at(i);
+    obj->make_scalar_in_safepoints(igvn);
+    igvn.record_for_igvn(obj);
+  }
+  igvn.optimize();
+  assert(_new_object_nodes.length() == 0, "must be empty after igvn");
+}
+
 void Compile::add_inline_type(Node* n) {
   assert(n->is_InlineType(), "unexpected node");
   _inline_type_nodes.push(n);
@@ -2784,6 +2813,7 @@ void Compile::Optimize() {
   remove_root_to_sfpts_edges(igvn);
 
   // Process inline type nodes now that all inlining is over
+  process_new_objects(igvn);
   process_inline_types(igvn);
 
   adjust_flat_array_access_aliases(igvn);

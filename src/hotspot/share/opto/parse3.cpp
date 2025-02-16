@@ -31,6 +31,7 @@
 #include "opto/castnode.hpp"
 #include "opto/inlinetypenode.hpp"
 #include "opto/memnode.hpp"
+#include "opto/newobjectnode.hpp"
 #include "opto/parse.hpp"
 #include "opto/rootnode.hpp"
 #include "opto/runtime.hpp"
@@ -251,6 +252,11 @@ void Parse::do_put_xxx(Node* obj, ciField* field, bool is_field) {
   BasicType bt = field->layout_type();
   Node* val = type2size[bt] == 1 ? pop() : pop_pair();
 
+  if (field->is_null_free() && field->type()->as_inline_klass()->is_empty()) {
+    // Storing to a field of an empty inline type. Ignore.
+    return;
+  }
+
   if (field->is_null_free()) {
     PreserveReexecuteState preexecs(this);
     jvms()->set_should_reexecute(true);
@@ -260,14 +266,11 @@ void Parse::do_put_xxx(Node* obj, ciField* field, bool is_field) {
       return;
     }
   }
-  if (obj->is_InlineType()) {
-    set_inline_type_field(obj, field, val);
+  if (obj->is_NewObject()) {
+    set_new_object_field(obj->as_NewObject(), field, val);
     return;
   }
-  if (field->is_null_free() && field->type()->as_inline_klass()->is_empty()) {
-    // Storing to a field of an empty inline type. Ignore.
-    return;
-  } else if (field->is_flat()) {
+  if (field->is_flat()) {
     // Storing to a flat inline type field.
     ciInlineKlass* vk = field->type()->as_inline_klass();
     if (!val->is_InlineType()) {
@@ -331,11 +334,7 @@ void Parse::do_put_xxx(Node* obj, ciField* field, bool is_field) {
   }
 }
 
-void Parse::set_inline_type_field(Node* obj, ciField* field, Node* val) {
-  assert(_method->is_object_constructor(), "inline type is initialized outside of constructor");
-  assert(obj->as_InlineType()->is_larval(), "must be larval");
-  assert(!_gvn.type(obj)->maybe_null(), "should never be null");
-
+void Parse::set_new_object_field(NewObjectNode* obj, ciField* field, Node* val) {
   // Re-execute if buffering in below code triggers deoptimization.
   PreserveReexecuteState preexecs(this);
   jvms()->set_should_reexecute(true);
@@ -345,29 +344,14 @@ void Parse::set_inline_type_field(Node* obj, ciField* field, Node* val) {
     // Scalarize inline type field value
     val = InlineTypeNode::make_from_oop(this, val, field->type()->as_inline_klass(), field->is_null_free());
   } else if (val->is_InlineType() && !field->is_flat()) {
-    // Field value needs to be allocated because it can be merged with a non-inline type.
+    // Field value needs to be allocated
     val = val->as_InlineType()->buffer(this);
   }
 
   // Clone the inline type node and set the new field value
-  InlineTypeNode* new_vt = obj->as_InlineType()->clone_if_required(&_gvn, _map);
-  new_vt->set_field_value_by_offset(field->offset_in_bytes(), val);
-  new_vt = new_vt->adjust_scalarization_depth(this);
-
-  // If the inline type is buffered and the caller might use the buffer, update it.
-  if (new_vt->is_allocated(&gvn()) && (!_caller->has_method() || C->inlining_incrementally() || _caller->method()->is_object_constructor())) {
-    new_vt->store(this, new_vt->get_oop(), new_vt->get_oop(), new_vt->bottom_type()->inline_klass(), 0, field->offset_in_bytes());
-
-    // Preserve allocation ptr to create precedent edge to it in membar
-    // generated on exit from constructor.
-    AllocateNode* alloc = AllocateNode::Ideal_allocation(new_vt->get_oop());
-    if (alloc != nullptr) {
-      set_alloc_with_final_or_stable(new_vt->get_oop());
-    }
-    set_wrote_final(true);
-  }
-
-  replace_in_map(obj, _gvn.transform(new_vt));
+  NewObjectNode* new_obj = obj->clone_if_required(_gvn, _map);
+  new_obj->set_field_value_by_offset(field->offset_in_bytes(), val);
+  replace_in_map(obj, _gvn.transform(new_obj));
   return;
 }
 

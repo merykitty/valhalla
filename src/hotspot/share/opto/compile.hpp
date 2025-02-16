@@ -66,6 +66,7 @@ class MachConstantBaseNode;
 class MachNode;
 class MachOper;
 class MachSafePointNode;
+class NewObjectNode;
 class Node;
 class Node_Array;
 class Node_List;
@@ -382,6 +383,7 @@ class Compile : public Phase {
   GrowableArray<Node*>  _template_assertion_predicate_opaqs;
   GrowableArray<Node*>  _expensive_nodes;       // List of nodes that are expensive to compute and that we'd better not let the GVN freely common
   GrowableArray<Node*>  _for_post_loop_igvn;    // List of nodes for IGVN after loop opts are over
+  GrowableArray<NewObjectNode*> _new_object_nodes; // List of larval inline type nodes
   GrowableArray<Node*>  _inline_type_nodes;     // List of InlineType nodes
   GrowableArray<UnstableIfTrap*> _unstable_if_traps;        // List of ifnodes after IGVN
   GrowableArray<Node_List*> _coarsened_locks;   // List of coarsened Lock and Unlock nodes
@@ -781,6 +783,11 @@ public:
   void record_for_post_loop_opts_igvn(Node* n);
   void remove_from_post_loop_opts_igvn(Node* n);
   void process_for_post_loop_opts_igvn(PhaseIterGVN& igvn);
+
+  // Keep track of larval inline type nodes
+  void add_new_object(NewObjectNode* n);
+  void remove_new_object(NewObjectNode* n);
+  void process_new_objects(PhaseIterGVN& igvn);
 
   // Keep track of inline type nodes for later processing
   void add_inline_type(Node* n);

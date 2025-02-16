@@ -42,6 +42,7 @@
 #include "opto/mulnode.hpp"
 #include "opto/multnode.hpp"
 #include "opto/narrowptrnode.hpp"
+#include "opto/newobjectnode.hpp"
 #include "opto/node.hpp"
 #include "opto/opaquenode.hpp"
 #include "opto/rootnode.hpp"

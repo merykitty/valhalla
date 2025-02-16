@@ -619,6 +619,9 @@ void Node::destruct(PhaseValues* phase) {
   if (for_post_loop_opts_igvn()) {
     compile->remove_from_post_loop_opts_igvn(this);
   }
+  if (is_NewObject()) {
+    compile->remove_new_object(this->as_NewObject());
+  }
   if (is_InlineType()) {
     compile->remove_inline_type(this);
   }

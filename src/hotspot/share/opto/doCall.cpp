@@ -39,6 +39,7 @@
 #include "opto/cfgnode.hpp"
 #include "opto/inlinetypenode.hpp"
 #include "opto/mulnode.hpp"
+#include "opto/newobjectnode.hpp"
 #include "opto/parse.hpp"
 #include "opto/rootnode.hpp"
 #include "opto/runtime.hpp"
@@ -613,6 +614,8 @@ void Parse::do_call() {
     receiver_constraint = holder;
   }
 
+  
+  C->dump_igv("Before receiver checkcast", 5);
   if (receiver_constraint != nullptr) {
     Node* receiver_node = stack(sp() - nargs);
     Node* cls_node = makecon(TypeKlassPtr::make(receiver_constraint, Type::trust_interfaces));
@@ -629,6 +632,7 @@ void Parse::do_call() {
     }
     set_stack(sp() - nargs, casted_receiver);
   }
+  C->dump_igv("After receiver checkcast", 5);
 
   // Note:  It's OK to try to inline a virtual call.
   // The call generator will not attempt to inline a polymorphic call
@@ -677,6 +681,7 @@ void Parse::do_call() {
     receiver = record_profiled_receiver_for_speculation(receiver);
   }
 
+  C->dump_igv("Before cf->generate", 5);
   JVMState* new_jvms = cg->generate(jvms);
   if (new_jvms == nullptr) {
     // When inlining attempt fails (e.g., too many arguments),
@@ -822,17 +827,15 @@ void Parse::do_call() {
          //        Object.<init> calls would have a non-inline-type receiver which we already excluded in the check above.
          cg->method()->holder()->is_java_lang_Object())
         ) {
-      assert(local(0)->is_InlineType() && receiver->bottom_type()->is_inlinetypeptr() && receiver->is_InlineType() &&
+      assert(local(0)->is_NewObject() && receiver->bottom_type()->is_inlinetypeptr() && receiver->is_NewObject() &&
              _caller->map()->argument(_caller, 0)->bottom_type()->inline_klass() == receiver->bottom_type()->inline_klass(),
              "Unexpected receiver");
-      InlineTypeNode* updated_receiver = local(0)->as_InlineType();
-      InlineTypeNode* cloned_updated_receiver = updated_receiver->clone_if_required(&_gvn, _map);
-      cloned_updated_receiver->set_is_larval(false);
-      cloned_updated_receiver = _gvn.transform(cloned_updated_receiver)->as_InlineType();
+      NewObjectNode* larval_obj = local(0)->as_NewObject();
+      InlineTypeNode* non_larval_obj = InlineTypeNode::make_from_larval(gvn(), larval_obj);
       // Receiver updated by the just called constructor. We need to update the map to make the effect visible. After
       // the super() call, only the updated receiver in local(0) will be used from now on. Therefore, we do not need
-      // to update the original receiver 'receiver' but only the 'updated_receiver'.
-      replace_in_map(updated_receiver, cloned_updated_receiver);
+      // to update the original receiver 'receiver' but only the 'larval_obj'.
+      replace_in_map(larval_obj, non_larval_obj);
 
       if (_caller->has_method()) {
         // If the current method is inlined, we also need to update the exit map to propagate the updated receiver
@@ -840,7 +843,7 @@ void Parse::do_call() {
         Node* receiver_in_caller = _caller->map()->argument(_caller, 0);
         assert(receiver_in_caller->bottom_type()->inline_klass() == receiver->bottom_type()->inline_klass(),
                "Receiver type mismatch");
-        _exits.map()->replace_edge(receiver_in_caller, cloned_updated_receiver, &_gvn);
+        _exits.map()->replace_edge(receiver_in_caller, non_larval_obj, &_gvn);
       }
     }
   }

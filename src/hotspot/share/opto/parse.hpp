@@ -554,7 +554,7 @@ class Parse : public GraphKit {
   // common code for actually performing the load or store
   void do_get_xxx(Node* obj, ciField* field);
   void do_put_xxx(Node* obj, ciField* field, bool is_field);
-  void set_inline_type_field(Node* obj, ciField* field, Node* val);
+  void set_new_object_field(NewObjectNode* obj, ciField* field, Node* val);
 
   ciType* improve_abstract_inline_type_klass(ciType* field_klass);
 

@@ -32,6 +32,7 @@
 #include "opto/inlinetypenode.hpp"
 #include "opto/memnode.hpp"
 #include "opto/mulnode.hpp"
+#include "opto/newobjectnode.hpp"
 #include "opto/parse.hpp"
 #include "opto/rootnode.hpp"
 #include "opto/runtime.hpp"
@@ -320,7 +321,7 @@ void Parse::do_new() {
   }
 
   if (klass->is_inlinetype()) {
-    push(InlineTypeNode::make_default(_gvn, klass->as_inline_klass(), /* is_larval */ true));
+    push(NewObjectNode::make_default(_gvn, klass));
     return;
   }
 

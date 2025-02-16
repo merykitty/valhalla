@@ -32,6 +32,7 @@
 #include "opto/inlinetypenode.hpp"
 #include "opto/movenode.hpp"
 #include "opto/narrowptrnode.hpp"
+#include "opto/newobjectnode.hpp"
 #include "opto/rootnode.hpp"
 #include "opto/phaseX.hpp"
 
@@ -1325,6 +1326,15 @@ bool InlineTypeNode::is_larval(PhaseGVN* gvn) const {
   Node* oop = get_oop();
   AllocateNode* alloc = AllocateNode::Ideal_allocation(oop);
   return alloc != nullptr && alloc->_larval;
+}
+
+InlineTypeNode* InlineTypeNode::make_from_larval(PhaseGVN& gvn, NewObjectNode* larval) {
+  InlineTypeNode* vt = make_uninitialized(gvn, larval->klass()->as_inline_klass());
+  assert(vt->field_count() == larval->field_count(), "%u != %u", vt->field_count(), larval->field_count());
+  for (uint i = 0; i < vt->field_count(); i++) {
+    vt->set_field_value(i, larval->field_value(i));
+  }
+  return gvn.transform(vt)->as_InlineType();
 }
 
 Node* InlineTypeNode::is_loaded(PhaseGVN* phase, ciInlineKlass* vk, Node* base, int holder_offset) {

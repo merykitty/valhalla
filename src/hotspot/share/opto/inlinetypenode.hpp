@@ -103,6 +103,8 @@ public:
   static InlineTypeNode* make_from_multi(GraphKit* kit, MultiNode* multi, ciInlineKlass* vk, uint& base_input, bool in, bool null_free = true);
   // Create with null field values
   static InlineTypeNode* make_null(PhaseGVN& gvn, ciInlineKlass* vk, bool transform = true);
+  // Create from a larval object
+  static InlineTypeNode* make_from_larval(PhaseGVN& gvn, NewObjectNode* larval);
 
   // Returns the constant oop of the default inline type allocation
   static Node* default_oop(PhaseGVN& gvn, ciInlineKlass* vk);

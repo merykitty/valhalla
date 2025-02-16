@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2025, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2024, Alibaba Group Holding Limited. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -138,6 +138,7 @@ class MultiBranchNode;
 class NegNode;
 class NegVNode;
 class NeverBranchNode;
+class NewObjectNode;
 class Opaque1Node;
 class OpaqueLoopInitNode;
 class OpaqueLoopStrideNode;
@@ -751,11 +752,12 @@ public:
         DEFINE_CLASS_ID(NegV, Vector, 8)
         DEFINE_CLASS_ID(SaturatingVector, Vector, 9)
         DEFINE_CLASS_ID(MulVL, Vector, 10)
-      DEFINE_CLASS_ID(InlineType, Type, 8)
-      DEFINE_CLASS_ID(Con, Type, 9)
-          DEFINE_CLASS_ID(ConI, Con, 0)
-      DEFINE_CLASS_ID(SafePointScalarMerge, Type, 10)
-      DEFINE_CLASS_ID(Convert, Type, 11)
+      DEFINE_CLASS_ID(NewObject, Type, 8)
+      DEFINE_CLASS_ID(InlineType, Type, 9)
+      DEFINE_CLASS_ID(Con, Type, 10)
+        DEFINE_CLASS_ID(ConI, Con, 0)
+      DEFINE_CLASS_ID(SafePointScalarMerge, Type, 11)
+      DEFINE_CLASS_ID(Convert, Type, 12)
 
 
     DEFINE_CLASS_ID(Proj,  Node, 3)
@@ -1012,6 +1014,7 @@ public:
   DEFINE_CLASS_QUERY(Sub)
   DEFINE_CLASS_QUERY(SubTypeCheck)
   DEFINE_CLASS_QUERY(Type)
+  DEFINE_CLASS_QUERY(NewObject)
   DEFINE_CLASS_QUERY(InlineType)
   DEFINE_CLASS_QUERY(Vector)
   DEFINE_CLASS_QUERY(VectorMaskCmp)

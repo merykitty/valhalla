@@ -461,6 +461,7 @@ void Compile::disconnect_useless_nodes(Unique_Node_List& useful, Unique_Node_Lis
   remove_useless_nodes(_template_assertion_predicate_opaqs, useful); // remove useless Assertion Predicate opaque nodes
   remove_useless_nodes(_expensive_nodes,    useful); // remove useless expensive nodes
   remove_useless_nodes(_for_post_loop_igvn, useful); // remove useless node recorded for post loop opts IGVN pass
+  remove_useless_nodes(_new_object_nodes,   useful); // remove useless larval inline type nodes
   remove_useless_nodes(_inline_type_nodes,  useful); // remove useless inline type nodes
 #ifdef ASSERT
   if (_modified_nodes != nullptr) {
@@ -666,6 +667,7 @@ Compile::Compile(ciEnv* ci_env, ciMethod* target, int osr_bci,
       _template_assertion_predicate_opaqs(comp_arena(), 8, 0, nullptr),
       _expensive_nodes(comp_arena(), 8, 0, nullptr),
       _for_post_loop_igvn(comp_arena(), 8, 0, nullptr),
+      _new_object_nodes(comp_arena(), 8, 0, nullptr),
       _inline_type_nodes (comp_arena(), 8, 0, nullptr),
       _unstable_if_traps(comp_arena(), 8, 0, nullptr),
       _coarsened_locks(comp_arena(), 8, 0, nullptr),

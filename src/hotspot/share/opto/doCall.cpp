@@ -614,8 +614,6 @@ void Parse::do_call() {
     receiver_constraint = holder;
   }
 
-  
-  C->dump_igv("Before receiver checkcast", 5);
   if (receiver_constraint != nullptr) {
     Node* receiver_node = stack(sp() - nargs);
     Node* cls_node = makecon(TypeKlassPtr::make(receiver_constraint, Type::trust_interfaces));
@@ -632,7 +630,6 @@ void Parse::do_call() {
     }
     set_stack(sp() - nargs, casted_receiver);
   }
-  C->dump_igv("After receiver checkcast", 5);
 
   // Note:  It's OK to try to inline a virtual call.
   // The call generator will not attempt to inline a polymorphic call
@@ -681,7 +678,6 @@ void Parse::do_call() {
     receiver = record_profiled_receiver_for_speculation(receiver);
   }
 
-  C->dump_igv("Before cf->generate", 5);
   JVMState* new_jvms = cg->generate(jvms);
   if (new_jvms == nullptr) {
     // When inlining attempt fails (e.g., too many arguments),
@@ -817,6 +813,8 @@ void Parse::do_call() {
     if (is_current_method_inline_type_constructor &&
         // Is the just called method an inline type constructor?
         cg->method()->is_object_constructor() && receiver->bottom_type()->is_inlinetypeptr() &&
+        // Is the receiver is a larval
+        local(0)->is_NewObject() &&
          // AND:
          // 1) ... invoked on the same receiver? Then it's another constructor on the same object doing the initialization.
         (receiver == _caller->map()->argument(_caller, 0) ||
@@ -831,7 +829,7 @@ void Parse::do_call() {
              _caller->map()->argument(_caller, 0)->bottom_type()->inline_klass() == receiver->bottom_type()->inline_klass(),
              "Unexpected receiver");
       NewObjectNode* larval_obj = local(0)->as_NewObject();
-      InlineTypeNode* non_larval_obj = InlineTypeNode::make_from_larval(gvn(), larval_obj);
+      InlineTypeNode* non_larval_obj = InlineTypeNode::make_from_oop(this, larval_obj, receiver->bottom_type()->inline_klass());
       // Receiver updated by the just called constructor. We need to update the map to make the effect visible. After
       // the super() call, only the updated receiver in local(0) will be used from now on. Therefore, we do not need
       // to update the original receiver 'receiver' but only the 'larval_obj'.

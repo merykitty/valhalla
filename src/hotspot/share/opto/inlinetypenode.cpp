@@ -1124,6 +1124,16 @@ bool InlineTypeNode::is_default(PhaseGVN* gvn) const {
 }
 
 InlineTypeNode* InlineTypeNode::make_from_oop(GraphKit* kit, Node* oop, ciInlineKlass* vk, bool null_free, bool is_larval) {
+  if (oop->is_NewObject()) {
+    NewObjectNode* larval = oop->as_NewObject();
+    InlineTypeNode* vt = make_uninitialized(kit->gvn(), larval->klass()->as_inline_klass());
+    assert(vt->field_count() == larval->field_count(), "%u != %u", vt->field_count(), larval->field_count());
+    for (uint i = 0; i < vt->field_count(); i++) {
+      vt->set_field_value(i, larval->field_value(i));
+    }
+    return kit->gvn().transform(vt)->as_InlineType();
+  }
+
   GrowableArray<ciType*> visited;
   visited.push(vk);
   return make_from_oop_impl(kit, oop, vk, null_free, visited, is_larval);
@@ -1326,15 +1336,6 @@ bool InlineTypeNode::is_larval(PhaseGVN* gvn) const {
   Node* oop = get_oop();
   AllocateNode* alloc = AllocateNode::Ideal_allocation(oop);
   return alloc != nullptr && alloc->_larval;
-}
-
-InlineTypeNode* InlineTypeNode::make_from_larval(PhaseGVN& gvn, NewObjectNode* larval) {
-  InlineTypeNode* vt = make_uninitialized(gvn, larval->klass()->as_inline_klass());
-  assert(vt->field_count() == larval->field_count(), "%u != %u", vt->field_count(), larval->field_count());
-  for (uint i = 0; i < vt->field_count(); i++) {
-    vt->set_field_value(i, larval->field_value(i));
-  }
-  return gvn.transform(vt)->as_InlineType();
 }
 
 Node* InlineTypeNode::is_loaded(PhaseGVN* phase, ciInlineKlass* vk, Node* base, int holder_offset) {

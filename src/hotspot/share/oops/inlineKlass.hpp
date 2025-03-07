@@ -50,6 +50,7 @@ class InlineKlass: public InstanceKlass {
   // Constructor
   InlineKlass(const ClassFileParser& parser);
 
+  void init_default_value(oop dst, int payload_offset);
   void init_fixed_block();
   inline InlineKlassFixedBlock* inlineklass_static_block() const;
   inline address adr_return_regs() const;

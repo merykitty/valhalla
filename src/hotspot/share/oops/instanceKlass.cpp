@@ -1537,6 +1537,11 @@ void InstanceKlass::initialize_impl(TRAPS) {
         }
       }
     }
+
+    if (this->is_inline_klass()) {
+      InlineKlass* vk = InlineKlass::cast(this);
+      vk->init_default_value(vk->default_value(), vk->payload_offset());
+    }
   }
 
 

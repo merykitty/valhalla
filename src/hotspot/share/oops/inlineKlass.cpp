@@ -61,6 +61,25 @@ InlineKlass::InlineKlass() {
   assert(CDSConfig::is_dumping_archive() || UseSharedSpaces, "only for CDS");
 }
 
+void InlineKlass::init_default_value(oop dst, int payload_offset) {
+  for (AllFieldStream fs(this); !fs.done(); fs.next()) {
+    if (fs.is_null_free_inline_type()) {
+      InlineKlass* vk = InlineKlass::cast(get_inline_type_field_klass(fs.index()));
+      assert(vk->is_initialized() || vk->is_being_initialized(), "field type must have been initialized");
+      if (fs.access_flags().is_static()) {
+        continue;
+      }
+
+      int field_offset = payload_offset + (fs.offset() - this->payload_offset());
+      if (fs.is_flat()) {
+        vk->init_default_value(dst, field_offset);
+      } else {
+        dst->obj_field_put(field_offset, vk->default_value());
+      }
+    }
+  }
+}
+
 void InlineKlass::init_fixed_block() {
   _adr_inlineklass_fixed_block = inlineklass_static_block();
   // Addresses used for inline type calling convention

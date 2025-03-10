@@ -995,6 +995,7 @@ Node* InlineTypeNode::Ideal(PhaseGVN* phase, bool can_reshape) {
       (!oop->is_Con() || phase->type(oop)->is_zero_type())) {
     // Use the pre-allocated oop for null-free default or empty inline types
     set_oop(*phase, default_oop(*phase, inline_klass()));
+    set_is_buffered(*phase);
     assert(is_allocated(phase), "should now be allocated");
     return this;
   }
@@ -1013,6 +1014,7 @@ Node* InlineTypeNode::Ideal(PhaseGVN* phase, bool can_reshape) {
   Node* base = is_loaded(phase);
   if (base != nullptr && get_oop() != base && !phase->type(base)->maybe_null()) {
     set_oop(*phase, base);
+    set_is_buffered(*phase);
     assert(is_allocated(phase), "should now be allocated");
     return this;
   }

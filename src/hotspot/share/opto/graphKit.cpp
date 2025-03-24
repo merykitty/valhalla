@@ -3156,7 +3156,7 @@ Node* GraphKit::type_check_receiver(Node* receiver, ciKlass* klass,
       Node* res = _gvn.transform(cast);
       if (recv_xtype->is_inlinetypeptr()) {
         assert(!gvn().type(res)->maybe_null(), "receiver should never be null");
-        res = InlineTypeNode::make_from_oop(this, res, recv_xtype->inline_klass());
+        res = InlineTypeNode::make_from_oop(this, res, recv_xtype->inline_klass(), false);
       }
       (*casted_receiver) = res;
       assert(!(*casted_receiver)->is_top(), "that path should be unreachable");
@@ -3193,7 +3193,7 @@ Node* GraphKit::subtype_check_receiver(Node* receiver, ciKlass* klass,
     if (receiver_type != nullptr && !receiver_type->higher_equal(recv_type)) { // ignore redundant casts
       Node* cast = _gvn.transform(new CheckCastPPNode(control(), receiver, recv_type));
       if (recv_type->is_inlinetypeptr()) {
-        cast = InlineTypeNode::make_from_oop(this, cast, recv_type->inline_klass());
+        cast = InlineTypeNode::make_from_oop(this, cast, recv_type->inline_klass(), false);
       }
       (*casted_receiver) = cast;
     }
@@ -3737,7 +3737,7 @@ Node* GraphKit::gen_checkcast(Node *obj, Node* superklass, Node* *failure_contro
   if (!stopped() && !res->is_InlineType()) {
     res = record_profiled_receiver_for_speculation(res);
     if (toop->is_inlinetypeptr()) {
-      Node* vt = InlineTypeNode::make_from_oop(this, res, toop->inline_klass(), !gvn().type(res)->maybe_null());
+      Node* vt = InlineTypeNode::make_from_oop(this, res, toop->inline_klass(), false);
       res = vt;
       if (safe_for_replace) {
         replace_in_map(obj, vt);
@@ -4803,7 +4803,7 @@ Node* GraphKit::maybe_narrow_object_type(Node* obj, ciKlass* type) {
     obj = casted_obj;
   }
   if (sig_type->is_inlinetypeptr()) {
-    obj = InlineTypeNode::make_from_oop(this, obj, sig_type->inline_klass(), !gvn().type(obj)->maybe_null());
+    obj = InlineTypeNode::make_from_oop(this, obj, sig_type->inline_klass(), false);
   }
   return obj;
 }

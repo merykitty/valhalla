@@ -94,8 +94,14 @@ public:
   static InlineTypeNode* make_default(PhaseGVN& gvn, ciInlineKlass* vk, bool is_larval = false);
   // Create uninitialized
   static InlineTypeNode* make_uninitialized(PhaseGVN& gvn, ciInlineKlass* vk, bool null_free = true);
-  // Create and initialize by loading the field values from an oop
-  static InlineTypeNode* make_from_oop(GraphKit* kit, Node* oop, ciInlineKlass* vk, bool null_free = true, bool is_larval = false);
+
+  // Create and initialize by loading the field values from an oop. null_free here means that if we
+  // encounter a null pointer, we will treat it as if it is the default oop of the inline type.
+  // This is because null-free members are still initialized with null and will be corrected upon
+  // loading. null_free should only be true when we load a null-free member of an object, or a
+  // null-free member in an array (either a non-flat element or a nested member of a flat element).
+  static InlineTypeNode* make_from_oop(GraphKit* kit, Node* oop, ciInlineKlass* vk, bool null_free, bool is_larval = false);
+
   // Create and initialize by loading the field values from a flat field or array
   static InlineTypeNode* make_from_flat(GraphKit* kit, ciInlineKlass* vk, Node* obj, Node* ptr, Node* idx, ciInstanceKlass* holder = nullptr, int holder_offset = 0,
                                         bool atomic = false, int null_marker_offset = -1, DecoratorSet decorators = IN_HEAP | MO_UNORDERED);

@@ -2548,7 +2548,7 @@ void Parse::sharpen_type_after_if(BoolTest::mask btest,
             _gvn.set_type_bottom(ccast);
             record_for_igvn(ccast);
             if (tboth->is_inlinetypeptr()) {
-              ccast = InlineTypeNode::make_from_oop(this, ccast, tboth->exact_klass(true)->as_inline_klass());
+              ccast = InlineTypeNode::make_from_oop(this, ccast, tboth->exact_klass(true)->as_inline_klass(), false);
             }
             // Here's the payoff.
             replace_in_map(obj, ccast);

@@ -1344,6 +1344,8 @@ void PhaseIterGVN::remove_globally_dead_node( Node *dead ) {
               }
             } else if (dead->is_data_proj_of_pure_function(in)) {
               _worklist.push(in);
+            } else if (in->is_OpaqueInlineTypeLoad()) {
+              add_users_to_worklist(in);
             } else {
               BarrierSet::barrier_set()->barrier_set_c2()->enqueue_useful_gc_barrier(this, in);
             }

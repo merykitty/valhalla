@@ -766,6 +766,9 @@ void Parse::do_call() {
             if (arg_type != nullptr && !arg_type->higher_equal(sig_type)) {
               Node* retnode = pop();
               Node* cast_obj = _gvn.transform(new CheckCastPPNode(control(), retnode, sig_type));
+              if (ctype->is_inlinetype()) {
+                cast_obj = InlineTypeNode::make_from_oop(this, cast_obj, ctype->as_inline_klass());
+              }
               push(cast_obj);
             }
           }
@@ -808,11 +811,6 @@ void Parse::do_call() {
     BasicType ct = ctype->basic_type();
     if (is_reference_type(ct)) {
       record_profiled_return_for_speculation();
-    }
-    if (rtype->is_inlinetype() && !peek()->is_InlineType()) {
-      Node* retnode = pop();
-      retnode = InlineTypeNode::make_from_oop(this, retnode, rtype->as_inline_klass());
-      push_node(T_OBJECT, retnode);
     }
 
     // Note that:

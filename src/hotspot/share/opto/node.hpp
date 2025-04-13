@@ -145,6 +145,7 @@ class OpaqueLoopStrideNode;
 class OpaqueMultiversioningNode;
 class OpaqueNotNullNode;
 class OpaqueInitializedAssertionPredicateNode;
+class OpaqueInlineTypeLoadNode;
 class OpaqueTemplateAssertionPredicateNode;
 class OuterStripMinedLoopNode;
 class OuterStripMinedLoopEndNode;
@@ -699,6 +700,7 @@ public:
         DEFINE_CLASS_ID(Initialize,       MemBar, 0)
         DEFINE_CLASS_ID(MemBarStoreStore, MemBar, 1)
         DEFINE_CLASS_ID(Blackhole,        MemBar, 2)
+      DEFINE_CLASS_ID(OpaqueInlineTypeLoad, Multi, 4)
 
     DEFINE_CLASS_ID(Mach,  Node, 1)
       DEFINE_CLASS_ID(MachReturn, Mach, 0)
@@ -1020,6 +1022,7 @@ public:
   DEFINE_CLASS_QUERY(SubTypeCheck)
   DEFINE_CLASS_QUERY(Type)
   DEFINE_CLASS_QUERY(InlineType)
+  DEFINE_CLASS_QUERY(OpaqueInlineTypeLoad)
   DEFINE_CLASS_QUERY(Vector)
   DEFINE_CLASS_QUERY(VectorMaskCmp)
   DEFINE_CLASS_QUERY(VectorUnbox)

@@ -49,6 +49,11 @@ public:
   ProjNode* proj_out(uint which_proj) const; // Get a named projection
   ProjNode* proj_out_or_null(uint which_proj) const;
   ProjNode* proj_out_or_null(uint which_proj, bool is_io_use) const;
+
+private:
+  friend class ProjNode;
+  virtual Node* proj_ideal(PhaseGVN* phase, bool can_reshape, ProjNode* proj) { return nullptr; }
+  virtual Node* proj_identity(PhaseGVN* phase, ProjNode* proj);
 };
 
 //------------------------------ProjNode---------------------------------------
@@ -82,6 +87,8 @@ public:
   virtual const Type *bottom_type() const;
   virtual const TypePtr *adr_type() const;
   virtual bool pinned() const;
+  virtual Node* Ideal(PhaseGVN* phase, bool can_reshape);
+  virtual Node* Identity(PhaseGVN* phase);
   virtual const Type* Value(PhaseGVN* phase) const;
   virtual uint ideal_reg() const;
   virtual const RegMask &out_RegMask() const;

@@ -79,6 +79,11 @@ ProjNode* MultiNode::proj_out(uint which_proj) const {
   return p;
 }
 
+Node* MultiNode::proj_identity(PhaseGVN* phase, ProjNode* proj) {
+  assert(proj->in(0) == this, "ProjNode %d not a projection of this node %d", int(proj->_idx), int(_idx));
+  return proj;
+}
+
 //=============================================================================
 //------------------------------ProjNode---------------------------------------
 uint ProjNode::hash() const {
@@ -161,6 +166,20 @@ void ProjNode::check_con() const {
   const Type* t = n->bottom_type();
   if (t == Type::TOP)  return;  // multi is dead
   assert(_con < t->is_tuple()->cnt(), "ProjNode::_con must be in range");
+}
+
+Node* ProjNode::Ideal(PhaseGVN* phase, bool can_reshape) {
+  if (in(0)->is_Multi()) {
+    return in(0)->as_Multi()->proj_ideal(phase, can_reshape, this);
+  }
+  return nullptr;
+}
+
+Node* ProjNode::Identity(PhaseGVN* phase) {
+  if (in(0)->is_Multi()) {
+    return in(0)->as_Multi()->proj_identity(phase, this);
+  }
+  return this;
 }
 
 //------------------------------Value------------------------------------------

@@ -1490,19 +1490,29 @@ Node* GraphKit::null_check_common(Node* value, BasicType type,
 //------------------------------cast_not_null----------------------------------
 // Cast obj to not-null on this path
 Node* GraphKit::cast_not_null(Node* obj, bool do_replace_in_map) {
+  const Type* t = _gvn.type(obj);
+  const Type* t_not_null = t->join_speculative(TypePtr::NOTNULL);
+  // Object is already not-null?
+  if (t == t_not_null) {
+    return obj;
+  }
+
   if (obj->is_InlineType()) {
-    Node* vt = obj->isa_InlineType()->clone_if_required(&gvn(), map(), do_replace_in_map);
-    vt->as_InlineType()->set_is_init(_gvn);
-    vt = _gvn.transform(vt);
+    OpaqueInlineTypeLoadNode* load = obj->as_InlineType()->opaque_load();
+    InlineTypeNode* vt;
+    if (load != nullptr) {
+      vt = InlineTypeNode::make_from_oop(this, cast_not_null(load->base()), t->inline_klass());
+    } else {
+      vt = obj->isa_InlineType()->clone_if_required(&gvn(), map(), do_replace_in_map);
+      vt->set_is_init(_gvn);
+      vt = _gvn.transform(vt)->as_InlineType();
+    }
+
     if (do_replace_in_map) {
       replace_in_map(obj, vt);
     }
     return vt;
   }
-  const Type *t = _gvn.type(obj);
-  const Type *t_not_null = t->join_speculative(TypePtr::NOTNULL);
-  // Object is already not-null?
-  if( t == t_not_null ) return obj;
 
   Node* cast = new CastPPNode(control(), obj,t_not_null);
   cast = _gvn.transform( cast );
@@ -2436,8 +2446,12 @@ Node* GraphKit::record_profile_for_speculation(Node* n, ciKlass* exact_kls, Prof
     // the new type. The new type depends on the control: what
     // profiling tells us is only valid from here as far as we can
     // tell.
-    Node* cast = new CheckCastPPNode(control(), n, current_type->remove_speculative()->join_speculative(spec_type));
+    const Type* new_type = current_type->remove_speculative()->join_speculative(spec_type);
+    Node* cast = new CheckCastPPNode(control(), n, new_type);
     cast = _gvn.transform(cast);
+    if (new_type->is_inlinetypeptr()) {
+      cast = InlineTypeNode::make_from_oop(this, cast, new_type->inline_klass());
+    }
     replace_in_map(n, cast);
     n = cast;
   }
@@ -3545,11 +3559,15 @@ Node* GraphKit::gen_checkcast(Node* obj, Node* superklass, Node* *failure_contro
         // If we know the type check always succeed then we don't use
         // the profiling data at this bytecode. Don't lose it, feed it
         // to the type system as a speculative type.
-        obj = record_profiled_receiver_for_speculation(obj);
         if (null_free) {
           assert(safe_for_replace, "must be");
           obj = null_check(obj);
         }
+        if (stopped()) {
+          return obj;
+        }
+
+        obj = record_profiled_receiver_for_speculation(obj);
         assert(stopped() || !toop->is_inlinetypeptr() || obj->is_InlineType(), "should have been scalarized");
         return obj;
       case Compile::SSC_always_false:

@@ -107,6 +107,13 @@ Node *ConstraintCastNode::Ideal(PhaseGVN *phase, bool can_reshape) {
   // Push cast through InlineTypeNode
   InlineTypeNode* vt = in(1)->isa_InlineType();
   if (vt != nullptr && phase->type(vt)->filter_speculative(_type) != Type::TOP) {
+    OpaqueInlineTypeLoadNode* load = vt->opaque_load();
+    if (load != nullptr) {
+      Node* cast = clone();
+      cast->set_req(1, load->base());
+      return cast;
+    }
+
     Node* cast = clone();
     cast->set_req(1, vt->get_oop());
     vt = vt->clone()->as_InlineType();

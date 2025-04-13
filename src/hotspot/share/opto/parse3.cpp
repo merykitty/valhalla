@@ -51,7 +51,7 @@ void Parse::do_field_access(bool is_get, bool is_field) {
 
   if (is_get && is_field && field_holder->is_inlinetype() && peek()->is_InlineType()) {
     InlineTypeNode* vt = peek()->as_InlineType();
-    null_check(vt);
+    vt = null_check(vt)->as_InlineType();
     Node* value = vt->field_value_by_offset(field->offset_in_bytes());
     if (value->is_InlineType()) {
       value = value->as_InlineType()->adjust_scalarization_depth(this);
@@ -101,7 +101,6 @@ void Parse::do_field_access(bool is_get, bool is_field) {
 #endif
 
     if (is_get) {
-      (void) pop();  // pop receiver before getting
       do_get_xxx(obj, field);
     } else {
       do_put_xxx(obj, field, is_field);
@@ -123,6 +122,8 @@ void Parse::do_field_access(bool is_get, bool is_field) {
 
 void Parse::do_get_xxx(Node* obj, ciField* field) {
   BasicType bt = field->layout_type();
+  int pop_cnt = field->is_static() ? 0 : 1;
+
   // Does this field have a constant value?  If so, just push the value.
   if (field->is_constant() && !field->is_flat() &&
       // Keep consistent with types found by ciTypeFlow: for an
@@ -134,6 +135,7 @@ void Parse::do_get_xxx(Node* obj, ciField* field) {
     // final or stable field
     Node* con = make_constant_from_field(field, obj);
     if (con != nullptr) {
+      dec_sp(pop_cnt);
       push_node(field->layout_type(), con);
       return;
     }
@@ -193,10 +195,8 @@ void Parse::do_get_xxx(Node* obj, ciField* field) {
   }
 
   // Adjust Java stack
-  if (type2size[bt] == 1)
-    push(ld);
-  else
-    push_pair(ld);
+  dec_sp(pop_cnt);
+  push_node(bt, ld);
 
   if (must_assert_null) {
     // Do not take a trap here.  It's possible that the program

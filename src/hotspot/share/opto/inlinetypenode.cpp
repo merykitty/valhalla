@@ -36,6 +36,24 @@
 #include "opto/rootnode.hpp"
 #include "opto/phaseX.hpp"
 
+// Visit all fields of an inline type, walk recursively into flat fields
+template <class Visitor>
+static void visit_all_fields_in_memory(ciInlineKlass* vk, int base_offset, Visitor visitor, bool null_free_valid = true) {
+  for (int i = 0; i < vk->nof_declared_nonstatic_fields(); i++) {
+    ciField* field = vk->declared_nonstatic_field_at(i);
+    ciType* type = field->type();
+    int offset = base_offset + field->offset_in_bytes() - vk->payload_offset();
+    if (field->is_flat()) {
+      visit_all_fields_in_memory(type->as_inline_klass(), offset, visitor, null_free_valid && field->is_null_free());
+      if (!field->is_null_free()) {
+        visitor(base_offset + field->null_marker_offset() - vk->payload_offset(), ciType::make(T_BOOLEAN), false);
+      }
+    } else {
+      visitor(offset, type, null_free_valid && field->is_null_free());
+    }
+  }
+}
+
 // Clones the inline type to handle control flow merges involving multiple inline types.
 // The inputs are replaced by PhiNodes to represent the merged values for the given region.
 InlineTypeNode* InlineTypeNode::clone_with_phis(PhaseGVN* gvn, Node* region, SafePointNode* map, bool is_init) {
@@ -188,6 +206,44 @@ void InlineTypeNode::add_new_path(Node* region) {
       assert(val->req() == region->req(), "must be same size as region");
     }
   }
+}
+
+OpaqueInlineTypeLoadNode* InlineTypeNode::opaque_load() const {
+  Node* oop = get_oop();
+  Node* is_init = get_is_init();
+  if (oop->is_Proj() && oop->in(0)->is_OpaqueInlineTypeLoad() && oop->as_Proj()->_con == OpaqueInlineTypeLoadNode::Oop &&
+      is_init->is_Proj() && is_init->in(0) == oop->in(0) && is_init->as_Proj()->_con == OpaqueInlineTypeLoadNode::IsInit) {
+    return oop->in(0)->as_OpaqueInlineTypeLoad();
+  }
+
+  return nullptr;
+}
+
+OpaqueInlineTypeLoadNode* InlineTypeNode::find_opaque_load() const {
+  Node* is_init = get_is_init();
+  if (is_init->is_Proj() && is_init->in(0)->is_OpaqueInlineTypeLoad() && is_init->as_Proj()->_con == OpaqueInlineTypeLoadNode::IsInit) {
+    OpaqueInlineTypeLoadNode* load = is_init->in(0)->as_OpaqueInlineTypeLoad();
+    ciInlineKlass* vk = inline_klass();
+    bool found = true;
+    uint out_idx = OpaqueInlineTypeLoadNode::Values;
+    visit_all_fields_in_memory(vk, vk->payload_offset(), [&](int offset, ciType* type, bool) {
+      if (!found) {
+        return;
+      }
+
+      Node* val = field_value_by_offset(offset, true);
+      if (val->in(0) != load || val->as_Proj()->_con != out_idx) {
+        found = false;
+        return;
+      }
+
+      out_idx += type->size();
+    });
+
+    return found ? load : nullptr;
+  }
+
+  return nullptr;
 }
 
 Node* InlineTypeNode::field_value(uint index) const {
@@ -999,7 +1055,7 @@ bool InlineTypeNode::is_allocated(PhaseGVN* phase) const {
   return !oop_type->maybe_null();
 }
 
-static void replace_proj(Compile* C, CallNode* call, uint& proj_idx, Node* value, BasicType bt) {
+static void replace_proj(Compile* C, MultiNode* call, uint& proj_idx, Node* value, BasicType bt) {
   ProjNode* pn = call->proj_out_or_null(proj_idx);
   if (pn != nullptr) {
     C->gvn_replace_by(pn, value);
@@ -1024,7 +1080,7 @@ void InlineTypeNode::replace_call_results(GraphKit* kit, CallNode* call, Compile
   assert(proj_idx == call->tf()->range_cc()->cnt(), "missed a projection");
 }
 
-void InlineTypeNode::replace_field_projs(Compile* C, CallNode* call, uint& proj_idx) {
+void InlineTypeNode::replace_field_projs(Compile* C, MultiNode* call, uint& proj_idx) {
   for (uint i = 0; i < field_count(); ++i) {
     Node* value = field_value(i);
     if (field_is_flat(i)) {
@@ -1089,6 +1145,7 @@ static void replace_allocation(PhaseIterGVN* igvn, Node* res, Node* dom) {
 
 Node* InlineTypeNode::Ideal(PhaseGVN* phase, bool can_reshape) {
   Node* oop = get_oop();
+  Node* is_buffered = get_is_buffered();
   if (oop->isa_InlineType() && !phase->type(oop)->maybe_null()) {
     InlineTypeNode* vtptr = oop->as_InlineType();
     set_oop(*phase, vtptr->get_oop());
@@ -1105,6 +1162,18 @@ Node* InlineTypeNode::Ideal(PhaseGVN* phase, bool can_reshape) {
   if (base != nullptr && get_oop() != base && !phase->type(base)->maybe_null()) {
     set_oop(*phase, base);
     assert(is_allocated(phase), "should now be allocated");
+    return this;
+  }
+
+  if (opaque_load() != nullptr && phase->type(is_buffered) != TypeInt::ONE) {
+    set_is_buffered(*phase);
+    return this;
+  }
+
+  OpaqueInlineTypeLoadNode* load = find_opaque_load();
+  if (load != nullptr && phase->type(is_buffered) != TypeInt::ONE) {
+    set_oop(*phase, phase->transform(new ProjNode(load, OpaqueInlineTypeLoadNode::Oop)));
+    set_is_buffered(*phase);
     return this;
   }
 
@@ -1214,62 +1283,58 @@ InlineTypeNode* InlineTypeNode::make_from_oop(GraphKit* kit, Node* oop, ciInline
 InlineTypeNode* InlineTypeNode::make_from_oop_impl(GraphKit* kit, Node* oop, ciInlineKlass* vk, GrowableArray<ciType*>& visited, bool is_larval) {
   PhaseGVN& gvn = kit->gvn();
 
-  // Create and initialize an InlineTypeNode by loading all field
-  // values from a heap-allocated version and also save the oop.
-  InlineTypeNode* vt = nullptr;
-
   if (oop->isa_InlineType()) {
     // TODO 8335256 Re-enable assert and fix OSR code
     // Issue triggers with TestValueConstruction.java and -XX:Tier0BackedgeNotifyFreqLog=0 -XX:Tier2BackedgeNotifyFreqLog=0 -XX:Tier3BackedgeNotifyFreqLog=0 -XX:Tier2BackEdgeThreshold=1 -XX:Tier3BackEdgeThreshold=1 -XX:Tier4BackEdgeThreshold=1 -Xbatch -XX:-TieredCompilation
     // assert(!is_larval || oop->as_InlineType()->is_larval(), "must be larval");
     if (is_larval && !oop->as_InlineType()->is_larval()) {
-      vt = oop->clone()->as_InlineType();
+      InlineTypeNode* vt = oop->clone()->as_InlineType();
       vt->set_is_larval(true);
       return gvn.transform(vt)->as_InlineType();
     }
     return oop->as_InlineType();
-  } else if (gvn.type(oop)->maybe_null()) {
-    // Add a null check because the oop may be null
-    Node* null_ctl = kit->top();
-    Node* not_null_oop = kit->null_check_oop(oop, &null_ctl);
-    if (kit->stopped()) {
-      // Constant null
-      kit->set_control(null_ctl);
-      vt = make_null_impl(gvn, vk, visited);
-      kit->record_for_igvn(vt);
-      return vt;
-    }
-    vt = new InlineTypeNode(vk, not_null_oop, /* null_free= */ false);
-    vt->set_is_buffered(gvn);
-    vt->set_is_init(gvn);
-    vt->set_is_larval(is_larval);
-    vt->load(kit, not_null_oop, not_null_oop, vk, visited);
+  }
 
-    if (null_ctl != kit->top()) {
-      InlineTypeNode* null_vt = make_null_impl(gvn, vk, visited);
-      Node* region = new RegionNode(3);
-      region->init_req(1, kit->control());
-      region->init_req(2, null_ctl);
-      vt = vt->clone_with_phis(&gvn, region, kit->map());
-      vt->merge_with(&gvn, null_vt, 2, true);
-      vt->set_oop(gvn, oop);
-      kit->set_control(gvn.transform(region));
-    }
-  } else {
-    // Oop can never be null
-    vt = new InlineTypeNode(vk, oop, /* null_free= */ true);
+  const Type* oop_type = gvn.type(oop);
+  if (oop_type == Type::TOP || oop_type == TypePtr::NULL_PTR) {
+    assert(!is_larval, "larval objects must be non-null");
+    return make_null_impl(gvn, vk, visited);
+  }
+
+  if (vk->is_empty()) {
+    InlineTypeNode* vt = new InlineTypeNode(vk, oop, /* null_free= */ false);
+    vt->set_is_buffered(gvn);
+    vt->init_req(IsInit, gvn.transform(new Conv2BNode(oop)));
+    vt->set_is_larval(is_larval);
+    vt = gvn.transform(vt)->as_InlineType();
+    kit->record_for_igvn(vt);
+    return vt;
+  }
+
+  if (!oop_type->maybe_null()) {
+    InlineTypeNode* vt = new InlineTypeNode(vk, oop, /* null_free= */ true);
     Node* init_ctl = kit->control();
     vt->set_is_buffered(gvn);
     vt->set_is_init(gvn);
-    vt->set_is_larval(is_larval);
     vt->load(kit, oop, oop, vk, visited);
-// TODO 8284443
-//    assert(!null_free || vt->as_InlineType()->is_all_zero(&gvn) || init_ctl != kit->control() || !gvn.type(oop)->is_inlinetypeptr() || oop->is_Con() || oop->Opcode() == Op_InlineType ||
-//           AllocateNode::Ideal_allocation(oop, &gvn) != nullptr || vt->as_InlineType()->is_loaded(&gvn) == oop, "inline type should be loaded");
+    vt->set_is_larval(is_larval);
+    vt = gvn.transform(vt)->as_InlineType();
+    assert(vt->is_allocated(&gvn), "inline type should be allocated");
+    kit->record_for_igvn(vt);
+    return vt;
   }
-  assert(vt->is_allocated(&gvn), "inline type should be allocated");
+
+  assert(!is_larval, "larval objects must be non-null");
+  MultiNode* opaque_load = OpaqueInlineTypeLoadNode::make(kit, oop, vk);
+  InlineTypeNode* vt = make_uninitialized(gvn, vk, false);
+  vt->set_oop(gvn, gvn.transform(new ProjNode(opaque_load, OpaqueInlineTypeLoadNode::Oop)));
+  vt->set_is_buffered(gvn);
+  vt->set_req(InlineTypeNode::IsInit, gvn.transform(new ProjNode(opaque_load, OpaqueInlineTypeLoadNode::IsInit)));
+  uint base_input = OpaqueInlineTypeLoadNode::Values;
+  vt->initialize_fields(kit, opaque_load, base_input, false, true, nullptr, visited);
+  vt = gvn.transform(vt)->as_InlineType();
   kit->record_for_igvn(vt);
-  return gvn.transform(vt)->as_InlineType();
+  return vt;
 }
 
 InlineTypeNode* InlineTypeNode::make_from_flat(GraphKit* kit, ciInlineKlass* vk, Node* obj, Node* ptr, Node* idx, ciInstanceKlass* holder, int holder_offset,
@@ -1634,7 +1699,7 @@ void InlineTypeNode::initialize_fields(GraphKit* kit, MultiNode* multi, uint& ba
       } else if (in) {
         parm = multi->as_Call()->in(base_input);
       } else {
-        parm = gvn.transform(new ProjNode(multi->as_Call(), base_input));
+        parm = gvn.transform(new ProjNode(multi->as_Multi(), base_input));
       }
       bool null_free = field_is_null_free(i);
       // Non-flat inline type field
@@ -1657,9 +1722,6 @@ void InlineTypeNode::initialize_fields(GraphKit* kit, MultiNode* multi, uint& ba
         } else if (!parm->is_InlineType()) {
           int old_len = visited.length();
           visited.push(type);
-          if (null_free) {
-            parm = kit->cast_not_null(parm);
-          }
           parm = make_from_oop_impl(kit, parm, type->as_inline_klass(), visited);
           visited.trunc_to(old_len);
         }
@@ -1795,3 +1857,311 @@ void InlineTypeNode::dump_spec(outputStream* st) const {
   }
 }
 #endif // NOT PRODUCT
+
+MultiNode* OpaqueInlineTypeLoadNode::make(GraphKit* kit, Node* oop, ciInlineKlass* vk) {
+  assert(!vk->is_empty(), "empty types do not need this node");
+
+  uint arg_num = 2; // Oop and IsInit
+  visit_all_fields_in_memory(vk, 0, [&](int, ciType* field_type, bool) {
+    arg_num += field_type->size();
+  });
+  const Type** output_types = TypeTuple::fields(arg_num);
+  output_types[FallThroughControl] = Type::CONTROL;
+  output_types[TrapControl] = Type::CONTROL;
+  output_types[Memory] = Type::MEMORY;
+  output_types[Oop] = TypeInstPtr::make(TypePtr::BotPTR, vk);
+  output_types[IsInit] = TypeInt::BOOL;
+
+  uint current_out = Values;
+  visit_all_fields_in_memory(vk, 0, [&](int, ciType* field_type, bool) {
+    output_types[current_out] = Type::get_const_type(field_type);
+    if (field_type->size() == 2) {
+      output_types[current_out + 1] = Type::HALF;
+    }
+    current_out += field_type->size();
+  });
+  const TypeTuple* type = TypeTuple::make(TypeFunc::Parms + arg_num, output_types);
+
+  assert(!oop->is_InlineType(), "must be an oop");
+  PhaseGVN& gvn = kit->gvn();
+  kit->kill_dead_locals();
+  const Type* oop_type = gvn.type(oop);
+  assert(oop_type != Type::TOP && oop_type != TypePtr::NULL_PTR && oop_type->maybe_null(), "only use this for non-constant nullable oops");
+  MultiNode* res = new OpaqueInlineTypeLoadNode(type, vk);
+
+  kit->C->add_opaque_inline_type_load(res);
+  res->init_req(TypeFunc::Control, kit->control());
+  Node* mem = kit->merged_memory();
+  res->init_req(TypeFunc::Memory, mem);
+  kit->record_for_igvn(mem);
+  res->init_req(TypeFunc::Parms, oop);
+  res = gvn.transform(res)->as_Multi();
+
+  kit->set_control(gvn.transform(new ProjNode(res, FallThroughControl)));
+  kit->set_all_memory(gvn.transform(new ProjNode(res, Memory)));
+  return res;
+}
+
+void OpaqueInlineTypeLoadNode::expand(PhaseIterGVN& igvn) {
+  Node* oop = base();
+  Node* mem = in(TypeFunc::Memory);
+  Node* cmp = igvn.transform(new CmpPNode(oop, igvn.zerocon(T_OBJECT)));
+  Node* bol = igvn.transform(new BoolNode(cmp, BoolTest::ne));
+  IfNode* iff = new IfNode(in(TypeFunc::Control), bol, PROB_MAX, COUNT_UNKNOWN);
+  igvn.set_type(iff, iff->Value(&igvn));
+  igvn.record_for_igvn(iff);
+  Node* iff_true = igvn.transform(new IfTrueNode(iff));
+  Node* iff_false = igvn.transform(new IfFalseNode(iff));
+  Node* casted_oop = igvn.transform(new CastPPNode(iff_true, oop, igvn.type(oop)->join_speculative(TypePtr::NOTNULL)));
+
+  Node* trap_out = proj_out_or_null(TrapControl);
+  const Type* oop_type = igvn.type(oop);
+  if (trap_out != nullptr && oop_type->maybe_null() && oop_type != Type::TOP && oop_type->is_ptr()->ptr() != TypePtr::TopPTR && oop_type != TypePtr::NULL_PTR) {
+    // Instead of doing oop == nullptr ? 0 : load(oop, offset), we do oop == nullptr ? trap() : load(oop, offset)
+    // This keeps the cfg more linear and easier for the optimizer to work with
+    Node* oop_out = proj_out_or_null(Oop);
+    if (oop_out != nullptr) {
+      igvn.replace_in_uses(oop_out, casted_oop);
+    }
+
+    Node* init_out = proj_out_or_null(IsInit);
+    if (init_out != nullptr) {
+      igvn.replace_in_uses(init_out, igvn.intcon(1));
+    }
+
+    uint current_out = Values;
+    visit_all_fields_in_memory(_vk, _vk->payload_offset(), [&](int field_offset, ciType* field_type, bool null_free) {
+      ProjNode* out = proj_out_or_null(current_out);
+      if (out != nullptr) {
+        const Type* ft = Type::get_const_type(field_type);
+        if (ft->isa_ptr() && null_free) {
+          ft = ft->join_speculative(TypePtr::NOTNULL);
+        }
+        Node* load_adr = igvn.transform(new AddPNode(casted_oop, casted_oop, igvn.MakeConX(field_offset)));
+        Node* replaced = LoadNode::make(igvn, nullptr, mem, load_adr, igvn.type(load_adr)->is_ptr(), ft, field_type->basic_type(), MemNode::unordered);
+        replaced = igvn.transform(replaced);
+        igvn.replace_in_uses(out, replaced);
+      }
+      current_out += field_type->size();
+    });
+
+    Node* ctl_out = proj_out_or_null(FallThroughControl);
+    if (ctl_out != nullptr) {
+      igvn.replace_in_uses(ctl_out, iff_true);
+    }
+    Node* trap_out = proj_out_or_null(TrapControl);
+    if (trap_out != nullptr) {
+      igvn.replace_in_uses(trap_out, iff_false);
+    }
+    Node* mem_out = proj_out_or_null(Memory);
+    if (mem_out != nullptr) {
+      igvn.replace_in_uses(mem_out, mem);
+    }
+
+    igvn.remove_globally_dead_node(this);
+    return;
+  }
+
+  Node* merge = new RegionNode(3);
+  igvn.set_type(merge, Type::CONTROL);
+  merge->init_req(1, iff_true);
+  merge->init_req(2, iff_false);
+  igvn.record_for_igvn(merge);
+
+  Node* oop_out = proj_out_or_null(Oop);
+  if (oop_out != nullptr) {
+    igvn.replace_in_uses(oop_out, oop);
+  }
+
+  Node* init_out = proj_out_or_null(IsInit);
+  if (init_out != nullptr) {
+    PhiNode* new_init = new PhiNode(merge, TypeInt::BOOL);
+    new_init->init_req(1, igvn.intcon(1));
+    new_init->init_req(2, igvn.intcon(0));
+    igvn.replace_in_uses(init_out, igvn.transform(new_init));
+  }
+
+  uint current_out = Values;
+  visit_all_fields_in_memory(_vk, _vk->payload_offset(), [&](int field_offset, ciType* field_type, bool null_free) {
+    ProjNode* out = proj_out_or_null(current_out);
+    if (out != nullptr) {
+      const Type* bottom_type = Type::get_const_type(field_type);
+      const Type* value_type = bottom_type;
+      if (bottom_type->isa_ptr() && null_free) {
+        value_type = value_type->join_speculative(TypePtr::NOTNULL);
+      }
+      Node* load_adr = igvn.transform(new AddPNode(casted_oop, casted_oop, igvn.MakeConX(field_offset)));
+      Node* true_branch = LoadNode::make(igvn, nullptr, mem, load_adr, igvn.type(load_adr)->is_ptr(), value_type, field_type->basic_type(), MemNode::unordered);
+      true_branch = igvn.transform(true_branch);
+
+      Node* false_branch = igvn.zerocon(field_type->basic_type());
+      Node* replaced = new PhiNode(merge, bottom_type);
+      replaced->init_req(1, true_branch);
+      replaced->init_req(2, false_branch);
+      replaced = igvn.transform(replaced);
+      igvn.replace_in_uses(out, replaced);
+    }
+    current_out += field_type->size();
+  });
+
+  Node* ctl_out = proj_out_or_null(FallThroughControl);
+  if (ctl_out != nullptr) {
+    igvn.replace_in_uses(ctl_out, merge);
+  }
+  if (trap_out != nullptr) {
+    igvn.replace_in_uses(trap_out, igvn.C->top());
+  }
+  Node* mem_out = proj_out_or_null(Memory);
+  if (mem_out != nullptr) {
+    igvn.replace_in_uses(mem_out, mem);
+  }
+
+  igvn.remove_globally_dead_node(this);
+}
+
+Node* OpaqueInlineTypeLoadNode::proj_ideal(PhaseGVN* phase, bool can_reshape, ProjNode* proj) {
+  assert(proj->in(0) == this, "ProjNode %d not a projection of this node %d", int(proj->_idx), int(_idx));
+  Node* oop = base();
+  Node* mem = in(TypeFunc::Memory);
+  const Type* oop_type = phase->type(oop);
+  if (oop_type == Type::TOP || oop_type == TypePtr::NULL_PTR) {
+    return nullptr;
+  }
+
+  if (!oop_type->maybe_null()) {
+    // Non-null oop, expand this node
+    if (proj->_con < Values) {
+      return nullptr;
+    }
+
+    uint idx = Values;
+    Node* res = nullptr;
+    visit_all_fields_in_memory(_vk, _vk->payload_offset(), [&](int field_offset, ciType* field_type, bool null_free) {
+      if (idx == proj->_con) {
+        const Type* ft = Type::get_const_type(field_type);
+        if (ft->isa_ptr() && null_free) {
+          ft = ft->join_speculative(TypePtr::NOTNULL);
+        }
+        Node* load_adr = phase->transform(new AddPNode(oop, oop, phase->MakeConX(field_offset)));
+        res = LoadNode::make(*phase, nullptr, mem, load_adr, phase->type(load_adr)->is_ptr(), ft, field_type->basic_type(), MemNode::unordered);
+      }
+
+      idx += field_type->size();
+    });
+
+    assert(res != nullptr, "must find the field at output index %d", proj->_con);
+    return res;
+  }
+
+  if (is_useless(phase)) {
+    if (proj->_con == IsInit) {
+      return new Conv2BNode(oop);
+    } else {
+      return nullptr;
+    }
+  }
+
+  return nullptr;
+}
+
+Node* OpaqueInlineTypeLoadNode::proj_identity(PhaseGVN* phase, ProjNode* proj) {
+  assert(proj->in(0) == this, "ProjNode %d not a projection of this node %d", int(proj->_idx), int(_idx));
+  Node* oop = base();
+  const Type* oop_type = phase->type(oop);
+  if (oop_type == Type::TOP) {
+    return proj;
+  }
+
+  if (oop->is_InlineType()) {
+    InlineTypeNode* vt = oop->as_InlineType();
+    if (proj->_con == FallThroughControl) {
+      return in(TypeFunc::Control);
+    } else if (proj->_con == TrapControl) {
+      return phase->C->top();
+    } else if (proj->_con == Memory) {
+      return in(TypeFunc::Memory);
+    } else if (proj->_con == Oop) {
+      return vt->get_oop();
+    } else if (proj->_con == IsInit) {
+      return vt->get_is_init();
+    } else {
+      Node* res = nullptr;
+      uint idx = Values;
+      visit_all_fields_in_memory(_vk, _vk->payload_offset(), [&](int field_offset, ciType* field_type, bool) {
+        if (idx == proj->_con) {
+          res = vt->field_value_by_offset(field_offset, true);
+        }
+        idx += field_type->size();
+      });
+      assert(res != nullptr, "must find the field at output index %d", proj->_con);
+      return res;
+    }
+  }
+
+  if (oop_type == TypePtr::NULL_PTR || !oop_type->maybe_null() || is_useless(phase)) {
+    if (proj->_con == FallThroughControl) {
+      return in(TypeFunc::Control);
+    } else if (proj->_con == TrapControl) {
+      return phase->C->top();
+    } else if (proj->_con == Memory) {
+      return in(TypeFunc::Memory);
+    } else if (proj->_con == Oop) {
+      return oop;
+    }
+  }
+
+  return proj;
+}
+
+const Type* OpaqueInlineTypeLoadNode::Value(PhaseGVN* phase) const {
+  Node* oop = base();
+  const Type* oop_type = phase->type(oop);
+  if (oop_type == Type::TOP) {
+    return Type::TOP;
+  }
+
+  const TypeTuple* current_type = bottom_type()->is_tuple();
+  if (oop_type == TypePtr::NULL_PTR || !oop_type->maybe_null()) {
+    const Type** output_types = TypeTuple::fields(current_type->cnt() - TypeFunc::Parms);
+    for (uint i = 0; i < current_type->cnt(); i++) {
+      output_types[i] = current_type->field_at(i);
+    }
+
+    if (oop_type == TypePtr::NULL_PTR) {
+      output_types[IsInit] = TypeInt::ZERO;
+      uint idx = Values;
+      visit_all_fields_in_memory(_vk, _vk->payload_offset(), [&](int, ciType* field_type, bool) {
+        output_types[idx] = Type::get_zero_type(field_type->basic_type());
+        idx += field_type->size();
+      });
+    } else {
+      output_types[IsInit] = TypeInt::ONE;
+    }
+    return TypeTuple::make(current_type->cnt(), output_types);
+  }
+
+  return current_type;
+}
+
+bool OpaqueInlineTypeLoadNode::is_useless(PhaseGVN* phase) const {
+  if (!phase->is_IterGVN()) {
+    return false;
+  }
+
+  for (DUIterator_Fast imax, i = fast_outs(imax); i < imax; i++) {
+    ProjNode* proj_out = fast_out(i)->as_Proj();
+    if (proj_out->_con >= Values) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+#ifndef PRODUCT
+
+void OpaqueInlineTypeLoadNode::dump_spec(outputStream *st) const {
+  _vk->print_name_on(st);
+}
+
+#endif // PRODUCT

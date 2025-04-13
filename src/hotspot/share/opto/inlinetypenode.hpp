@@ -31,10 +31,11 @@
 #include "opto/node.hpp"
 
 class GraphKit;
+class OpaqueInlineTypeLoadNode;
 
 //------------------------------InlineTypeNode-------------------------------------
 // Node representing an inline type in C2 IR
-class InlineTypeNode : public TypeNode {
+class InlineTypeNode final : public TypeNode {
 protected:
   InlineTypeNode(ciInlineKlass* vk, Node* oop, bool null_free)
       : TypeNode(TypeInstPtr::make(null_free ? TypePtr::NotNull : TypePtr::BotPTR, vk), Values + vk->nof_declared_nonstatic_fields()) {
@@ -54,10 +55,10 @@ protected:
 
   bool _is_larval;
 
-  virtual uint hash() const { return TypeNode::hash() + _is_larval; }
+  virtual uint hash() const override { return TypeNode::hash() + _is_larval; }
   // Don't GVN larvals because the inputs might be updated
-  virtual bool cmp(const Node &n) const { return TypeNode::cmp(n) && !(n.isa_InlineType()->_is_larval || _is_larval); }
-  virtual uint size_of() const { return sizeof(*this); }
+  virtual bool cmp(const Node &n) const override { return TypeNode::cmp(n) && !(n.isa_InlineType()->_is_larval || _is_larval); }
+  virtual uint size_of() const override { return sizeof(*this); }
 
   // Get the klass defining the field layout of the inline type
   ciInlineKlass* inline_klass() const { return type()->inline_klass(); }
@@ -69,6 +70,10 @@ protected:
 
   // Checks if the inline type oop is an allocated buffer with larval state
   bool is_larval(PhaseGVN* gvn) const;
+
+  // Checks if the fields are all loaded from an oop and the load is performed by an
+  // OpaqueInlineTypeLoadNode
+  OpaqueInlineTypeLoadNode* find_opaque_load() const;
 
   // Checks if the inline type is loaded from memory and if so returns the oop
   Node* is_loaded(PhaseGVN* phase, ciInlineKlass* vk = nullptr, Node* base = nullptr, int holder_offset = 0);
@@ -107,6 +112,10 @@ public:
   InlineTypeNode* merge_with(PhaseGVN* gvn, const InlineTypeNode* other, int pnum, bool transform);
   void add_new_path(Node* region);
 
+  // If this InlineTypeLoadNode is created from an OpaqueInlineTypeLoadNode
+  OpaqueInlineTypeLoadNode* opaque_load() const;
+
+public:
   // Get oop for heap allocated inline type (may be TypePtr::NULL_PTR)
   Node* get_oop() const    { return in(Oop); }
   void  set_oop(PhaseGVN& gvn, Node* oop) { set_req_X(Oop, oop, &gvn); }
@@ -153,7 +162,7 @@ public:
   bool is_allocated(PhaseGVN* phase) const;
 
   void replace_call_results(GraphKit* kit, CallNode* call, Compile* C);
-  void replace_field_projs(Compile* C, CallNode* call, uint& proj_idx);
+  void replace_field_projs(Compile* C, MultiNode* call, uint& proj_idx);
 
   // Allocate all non-flat inline type fields
   Node* allocate_fields(GraphKit* kit);
@@ -173,13 +182,60 @@ public:
 
   InlineTypeNode* clone_if_required(PhaseGVN* gvn, SafePointNode* map, bool safe_for_replace = true);
 
-  virtual const Type* Value(PhaseGVN* phase) const;
+  virtual const Type* Value(PhaseGVN* phase) const override;
 
-  virtual Node* Ideal(PhaseGVN* phase, bool can_reshape);
+  virtual Node* Ideal(PhaseGVN* phase, bool can_reshape) override;
 
-  virtual int Opcode() const;
+  virtual int Opcode() const override;
 
-  NOT_PRODUCT(void dump_spec(outputStream* st) const;)
+  NOT_PRODUCT(void dump_spec(outputStream* st) const override;)
+};
+
+class OpaqueInlineTypeLoadNode final : public MultiNode {
+private:
+  const TypeTuple* _type;
+  ciInlineKlass* _vk;
+
+  OpaqueInlineTypeLoadNode(const TypeTuple* type, ciInlineKlass* vk)
+    : MultiNode(TypeFunc::Parms + 1), _type(type), _vk(vk) {
+    init_class_id(Class_OpaqueInlineTypeLoad);
+  }
+
+public:
+  enum  {
+    FallThroughControl = 0,
+    TrapControl = 1,
+    Memory = 2,
+    Oop = TypeFunc::Parms,
+    IsInit = TypeFunc::Parms + 1,
+    Values = TypeFunc::Parms + 2
+  };
+
+  static MultiNode* make(GraphKit* kit, Node* oop, ciInlineKlass* vk);
+  Node* base() const { return in(TypeFunc::Parms); }
+  void expand(PhaseIterGVN& igvn);
+
+  virtual uint size_of() const override { return sizeof(this); }
+  virtual int Opcode() const override;
+  virtual const Type* bottom_type() const override { return _type; }
+  virtual const TypePtr* adr_type() const override { return TypePtr::BOTTOM; }
+
+private:
+  virtual Node* proj_ideal(PhaseGVN* phase, bool can_reshape, ProjNode* proj) override;
+  virtual Node* proj_identity(PhaseGVN* phase, ProjNode* proj) override;
+
+public:
+  virtual const Type* Value(PhaseGVN* phase) const override;
+
+private:
+  // This node is useless if none of the loaded fields are used
+  bool is_useless(PhaseGVN* phase) const;
+
+public:
+
+#ifndef PRODUCT
+  virtual void dump_spec(outputStream *st) const;
+#endif
 };
 
 #endif // SHARE_VM_OPTO_INLINETYPENODE_HPP

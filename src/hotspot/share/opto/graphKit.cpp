@@ -2019,13 +2019,6 @@ Node* GraphKit::set_results_for_java_call(CallJavaNode* call, bool separate_io_p
     ret = InlineTypeNode::make_from_multi(this, call, vk, base_input, false, false);
   } else {
     ret = _gvn.transform(new ProjNode(call, TypeFunc::Parms));
-    ciType* t = call->method()->return_type();
-    if (t->is_klass()) {
-      const Type* type = TypeOopPtr::make_from_klass(t->as_klass());
-      if (type->is_inlinetypeptr()) {
-        ret = InlineTypeNode::make_from_oop(this, ret, type->inline_klass());
-      }
-    }
   }
 
   // We just called the constructor on a value type receiver. Reload it from the buffer

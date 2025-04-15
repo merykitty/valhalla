@@ -79,16 +79,17 @@ protected:
   Node* is_loaded(PhaseGVN* phase, ciInlineKlass* vk = nullptr, Node* base = nullptr, int holder_offset = 0);
 
   // Initialize the inline type fields with the inputs or outputs of a MultiNode
-  void initialize_fields(GraphKit* kit, MultiNode* multi, uint& base_input, bool in, bool null_free, Node* null_check_region, GrowableArray<ciType*>& visited);
+  void initialize_fields(GraphKit* kit, MultiNode* multi, uint& base_input, bool in, bool null_free, Node* null_check_region, GrowableArray<ciType*>& visited, bool recursively_speculate_non_null);
 
   InlineTypeNode* adjust_scalarization_depth_impl(GraphKit* kit, GrowableArray<ciType*>& visited);
+  InlineTypeNode* recursively_speculate_non_null_impl(GraphKit* kit, GrowableArray<ciType*>& visited);
 
   static InlineTypeNode* make_all_zero_impl(PhaseGVN& gvn, ciInlineKlass* vk, GrowableArray<ciType*>& visited, bool is_larval = false);
-  static InlineTypeNode* make_from_oop_impl(GraphKit* kit, Node* oop, ciInlineKlass* vk, GrowableArray<ciType*>& visited, bool is_larval = false);
+  static InlineTypeNode* make_from_oop_impl(GraphKit* kit, Node* oop, ciInlineKlass* vk, GrowableArray<ciType*>& visited, bool is_larval = false, bool recursively_speculate_non_null = false);
   static InlineTypeNode* make_null_impl(PhaseGVN& gvn, ciInlineKlass* vk, GrowableArray<ciType*>& visited, bool transform = true);
-  static InlineTypeNode* make_from_flat_impl(GraphKit* kit, ciInlineKlass* vk, Node* obj, Node* ptr, Node* idx, ciInstanceKlass* holder, int holder_offset, bool atomic, int null_marker_offset, DecoratorSet decorators, GrowableArray<ciType*>& visited);
+  static InlineTypeNode* make_from_flat_impl(GraphKit* kit, ciInlineKlass* vk, Node* obj, Node* ptr, Node* idx, ciInstanceKlass* holder, int holder_offset, bool atomic, int null_marker_offset, DecoratorSet decorators, GrowableArray<ciType*>& visited, bool recursively_speculate_non_null);
 
-  void convert_from_payload(GraphKit* kit, BasicType bt, Node* payload, int holder_offset, bool null_free, int null_marker_offset);
+  void convert_from_payload(GraphKit* kit, BasicType bt, Node* payload, int holder_offset, bool null_free, int null_marker_offset, bool recursively_speculate_non_null);
   Node* convert_to_payload(GraphKit* kit, BasicType bt, Node* payload, int holder_offset, bool null_free, int null_marker_offset, int& oop_off_1, int& oop_off_2) const;
 
 public:
@@ -97,14 +98,17 @@ public:
   // Create uninitialized
   static InlineTypeNode* make_uninitialized(PhaseGVN& gvn, ciInlineKlass* vk, bool null_free = true);
   // Create and initialize by loading the field values from an oop
-  static InlineTypeNode* make_from_oop(GraphKit* kit, Node* oop, ciInlineKlass* vk, bool is_larval = false);
+  static InlineTypeNode* make_from_oop(GraphKit* kit, Node* oop, ciInlineKlass* vk, bool is_larval = false, bool recursively_speculate_non_null = false);
   // Create and initialize by loading the field values from a flat field or array
   static InlineTypeNode* make_from_flat(GraphKit* kit, ciInlineKlass* vk, Node* obj, Node* ptr, Node* idx, ciInstanceKlass* holder = nullptr, int holder_offset = 0,
-                                        bool atomic = false, int null_marker_offset = -1, DecoratorSet decorators = IN_HEAP | MO_UNORDERED);
+                                        bool atomic = false, int null_marker_offset = -1, DecoratorSet decorators = IN_HEAP | MO_UNORDERED, bool recursively_speculate_non_null = false);
   // Create and initialize with the inputs or outputs of a MultiNode (method entry or call)
-  static InlineTypeNode* make_from_multi(GraphKit* kit, MultiNode* multi, ciInlineKlass* vk, uint& base_input, bool in, bool null_free = true);
+  static InlineTypeNode* make_from_multi(GraphKit* kit, MultiNode* multi, ciInlineKlass* vk, uint& base_input, bool in, bool null_free = true, bool recursively_speculate_non_null = false);
   // Create with null field values
   static InlineTypeNode* make_null(PhaseGVN& gvn, ciInlineKlass* vk, bool transform = true);
+
+  // Initialize the inline type by loading its field values from memory
+  void load(GraphKit* kit, Node* base, Node* ptr, ciInstanceKlass* holder, GrowableArray<ciType*>& visited, int holder_offset = 0, DecoratorSet decorators = IN_HEAP | MO_UNORDERED, bool recursively_speculate_non_null = false);
 
   // Support for control flow merges
   bool has_phi_inputs(Node* region);
@@ -152,10 +156,10 @@ public:
   void store_flat(GraphKit* kit, Node* base, Node* ptr, Node* idx, ciInstanceKlass* holder, int holder_offset, bool atomic, int null_marker_offset, DecoratorSet decorators) const;
   // Store the field values to memory
   void store(GraphKit* kit, Node* base, Node* ptr, ciInstanceKlass* holder, int holder_offset = 0, int offset = -1, DecoratorSet decorators = C2_TIGHTLY_COUPLED_ALLOC | IN_HEAP | MO_UNORDERED) const;
-  // Initialize the inline type by loading its field values from memory
-  void load(GraphKit* kit, Node* base, Node* ptr, ciInstanceKlass* holder, GrowableArray<ciType*>& visited, int holder_offset = 0, DecoratorSet decorators = IN_HEAP | MO_UNORDERED);
   // Make sure that inline type is fully scalarized
   InlineTypeNode* adjust_scalarization_depth(GraphKit* kit);
+
+  InlineTypeNode* recursively_speculate_non_null(GraphKit* kit);
 
   // Allocates the inline type (if not yet allocated)
   InlineTypeNode* buffer(GraphKit* kit, bool safe_for_replace = true, bool must_init = true);
@@ -202,7 +206,7 @@ private:
   }
 
 public:
-  enum  {
+  enum {
     FallThroughControl = 0,
     TrapControl = 1,
     Memory = 2,
@@ -211,7 +215,7 @@ public:
     Values = TypeFunc::Parms + 2
   };
 
-  static MultiNode* make(GraphKit* kit, Node* oop, ciInlineKlass* vk);
+  static MultiNode* make(GraphKit* kit, Node* oop, ciInlineKlass* vk, bool speculate_non_null);
   Node* base() const { return in(TypeFunc::Parms); }
   void expand(PhaseIterGVN& igvn);
 
@@ -227,15 +231,16 @@ private:
 public:
   virtual const Type* Value(PhaseGVN* phase) const override;
 
-private:
-  // This node is useless if none of the loaded fields are used
-  bool is_useless(PhaseGVN* phase) const;
-
-public:
+  // This node is trivially useless if none of the loaded fields are used
+  bool is_trivially_useless(PhaseGVN& gvn) const;
 
 #ifndef PRODUCT
   virtual void dump_spec(outputStream *st) const;
 #endif
+
+private:
+  // Assume all InlineTypeNodes are removed, decide if this node is useless
+  bool is_useless_after_inline_type_removal(PhaseIterGVN& igvn) const;
 };
 
 #endif // SHARE_VM_OPTO_INLINETYPENODE_HPP

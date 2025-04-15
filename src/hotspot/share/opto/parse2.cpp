@@ -75,8 +75,8 @@ void Parse::array_load(BasicType bt) {
   Node* adr = array_addressing(bt, 0, elemtype);
   if (stopped())  return;     // guaranteed null or range check
 
-  Node* array_index = pop();
-  Node* array = pop();
+  Node* array_index = peek(0);
+  Node* array = peek(1);
 
   // Handle inline type arrays
   const TypeOopPtr* element_ptr = elemtype->make_oopptr();
@@ -141,6 +141,7 @@ void Parse::array_load(BasicType bt) {
     sync_kit(ideal);
     Node* ld = _gvn.transform(ideal.value(res));
     ld = record_profile_for_speculation_at_array_load(ld);
+    dec_sp(2);
     push_node(bt, ld);
     return;
   }
@@ -155,8 +156,9 @@ void Parse::array_load(BasicType bt) {
   // Loading an inline type from a non-flat array
   if (element_ptr != nullptr && element_ptr->is_inlinetypeptr()) {
     assert(!array_type->is_null_free() || !element_ptr->maybe_null(), "inline type array elements should never be null");
-    ld = InlineTypeNode::make_from_oop(this, ld, element_ptr->inline_klass());
+    ld = InlineTypeNode::make_from_oop(this, ld, element_ptr->inline_klass(), false, true);
   }
+  dec_sp(2);
   push_node(bt, ld);
 }
 
@@ -171,7 +173,6 @@ Node* Parse::load_from_unknown_flat_array(Node* array, Node* array_index, const 
     PreserveReexecuteState preexecs(this);
     jvms()->set_bci(_bci);
     jvms()->set_should_reexecute(true);
-    inc_sp(2);
     kill_dead_locals();
     call = make_runtime_call(RC_NO_LEAF | RC_NO_IO,
                              OptoRuntime::load_unknown_inline_Type(),

@@ -155,7 +155,7 @@ void Parse::do_get_xxx(Node* obj, ciField* field) {
     ciInlineKlass* vk = field->type()->as_inline_klass();
     bool is_naturally_atomic = field->is_null_free() && vk->nof_declared_nonstatic_fields() <= 1;
     bool needs_atomic_access = (!field->is_null_free() || field->is_volatile()) && !is_naturally_atomic;
-    ld = InlineTypeNode::make_from_flat(this, field_klass->as_inline_klass(), obj, obj, nullptr, field->holder(), offset, needs_atomic_access, field->null_marker_offset());
+    ld = InlineTypeNode::make_from_flat(this, field_klass->as_inline_klass(), obj, obj, nullptr, field->holder(), offset, needs_atomic_access, field->null_marker_offset(), IN_HEAP | MO_UNORDERED, true);
   } else {
     // Build the resultant type of the load
     const Type* type;
@@ -190,7 +190,7 @@ void Parse::do_get_xxx(Node* obj, ciField* field) {
     ld = access_load_at(obj, adr, adr_type, type, bt, decorators);
     if (field_klass->is_inlinetype()) {
       // Load a non-flattened inline type from memory
-      ld = InlineTypeNode::make_from_oop(this, ld, field_klass->as_inline_klass());
+      ld = InlineTypeNode::make_from_oop(this, ld, field_klass->as_inline_klass(), false, true);
     }
   }
 

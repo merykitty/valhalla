@@ -622,10 +622,19 @@ Parse::Parse(JVMState* caller, ciMethod* parse_method, float expected_uses)
     Node* parm = local(i);
     const Type* t = _gvn.type(parm);
     if (t->is_inlinetypeptr()) {
-      // Create InlineTypeNode from the oop and replace the parameter
-      bool is_larval = (i == 0) && method()->is_object_constructor() && !method()->holder()->is_java_lang_Object();
-      Node* vt = InlineTypeNode::make_from_oop(this, parm, t->inline_klass(), is_larval);
-      replace_in_map(parm, vt);
+      // Bind the uncommon traps to the entry so that we can avoid generating
+      // them when failures are recorded
+      set_bci(start_block()->start());
+      if (parm->is_InlineType()) {
+        Node* vt = parm->as_InlineType()->recursively_speculate_non_null(this);
+        replace_in_map(parm, vt);
+      } else {
+        // Create InlineTypeNode from the oop and replace the parameter
+        bool is_larval = (i == 0) && method()->is_object_constructor() && !method()->holder()->is_java_lang_Object();
+        Node* vt = InlineTypeNode::make_from_oop(this, parm, t->inline_klass(), is_larval, true);
+        replace_in_map(parm, vt);
+      }
+      set_bci(-1);
     } else if (UseTypeSpeculation && (i == (arg_size - 1)) && !is_osr_parse() && method()->has_vararg() &&
                t->isa_aryptr() != nullptr && !t->is_aryptr()->is_null_free() && !t->is_aryptr()->is_flat() &&
                (!t->is_aryptr()->is_not_null_free() || !t->is_aryptr()->is_not_flat())) {

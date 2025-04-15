@@ -563,7 +563,39 @@ InlineTypeNode* InlineTypeNode::adjust_scalarization_depth_impl(GraphKit* kit, G
   return (val == this) ? this : kit->gvn().transform(val)->as_InlineType();
 }
 
-void InlineTypeNode::load(GraphKit* kit, Node* base, Node* ptr, ciInstanceKlass* holder, GrowableArray<ciType*>& visited, int holder_offset, DecoratorSet decorators) {
+InlineTypeNode* InlineTypeNode::recursively_speculate_non_null(GraphKit* kit) {
+  GrowableArray<ciType*> visited;
+  visited.push(inline_klass());
+  return recursively_speculate_non_null_impl(kit, visited);
+}
+
+InlineTypeNode* InlineTypeNode::recursively_speculate_non_null_impl(GraphKit* kit, GrowableArray<ciType*>& visited) {
+  OpaqueInlineTypeLoadNode* load = opaque_load();
+  if (load != nullptr && load->proj_out_or_null(OpaqueInlineTypeLoadNode::TrapControl) == nullptr) {
+    return make_from_oop_impl(kit, load->base(), inline_klass(), visited, false, true);
+  }
+
+  InlineTypeNode* res = this;
+  for (uint i = 0; i < field_count(); i++) {
+    Node* val = field_value(i);
+    if (val->is_InlineType()) {
+      int old_len = visited.length();
+      visited.push(field_type(i));
+      Node* new_val = val->as_InlineType()->recursively_speculate_non_null_impl(kit, visited);
+      visited.trunc_to(old_len);
+
+      if (new_val != val) {
+        if (res == this) {
+          res = clone_if_required(&kit->gvn(), nullptr);
+        }
+        res->set_field_value(i, new_val);
+      }
+    }
+  }
+  return (res == this) ? this : kit->gvn().transform(res)->as_InlineType();
+}
+
+void InlineTypeNode::load(GraphKit* kit, Node* base, Node* ptr, ciInstanceKlass* holder, GrowableArray<ciType*>& visited, int holder_offset, DecoratorSet decorators, bool recursively_speculate_non_null) {
   // Initialize the inline type by loading its field values from
   // memory and adding the values as input edges to the node.
   for (uint i = 0; i < field_count(); ++i) {
@@ -579,7 +611,7 @@ void InlineTypeNode::load(GraphKit* kit, Node* base, Node* ptr, ciInstanceKlass*
       bool needs_atomic_access = !null_free || field_is_volatile(i);
       assert(!needs_atomic_access, "Atomic access in non-atomic container");
       int nm_offset = field_is_null_free(i) ? -1 : (holder_offset + field_null_marker_offset(i));
-      value = make_from_flat_impl(kit, ft->as_inline_klass(), base, ptr, nullptr, holder, offset, false, nm_offset, decorators, visited);
+      value = make_from_flat_impl(kit, ft->as_inline_klass(), base, ptr, nullptr, holder, offset, false, nm_offset, decorators, visited, recursively_speculate_non_null);
     } else {
       const TypeOopPtr* oop_ptr = kit->gvn().type(base)->isa_oopptr();
       bool is_array = (oop_ptr->isa_aryptr() != nullptr);
@@ -616,7 +648,7 @@ void InlineTypeNode::load(GraphKit* kit, Node* base, Node* ptr, ciInstanceKlass*
       } else if (ft->is_inlinetype()) {
         int old_len = visited.length();
         visited.push(ft);
-        value = make_from_oop_impl(kit, value, ft->as_inline_klass(), visited);
+        value = make_from_oop_impl(kit, value, ft->as_inline_klass(), visited, false, recursively_speculate_non_null);
         visited.trunc_to(old_len);
       }
     }
@@ -646,7 +678,7 @@ static Node* get_payload_value(PhaseGVN* gvn, Node* payload, BasicType bt, Basic
 }
 
 // Convert a payload value to field values
-void InlineTypeNode::convert_from_payload(GraphKit* kit, BasicType bt, Node* payload, int holder_offset, bool null_free, int null_marker_offset) {
+void InlineTypeNode::convert_from_payload(GraphKit* kit, BasicType bt, Node* payload, int holder_offset, bool null_free, int null_marker_offset, bool recursively_speculate_non_null) {
   PhaseGVN* gvn = &kit->gvn();
   Node* value = nullptr;
   if (!null_free) {
@@ -662,7 +694,7 @@ void InlineTypeNode::convert_from_payload(GraphKit* kit, BasicType bt, Node* pay
     if (field_is_flat(i)) {
       null_marker_offset = holder_offset + field_null_marker_offset(i) - inline_klass()->payload_offset();
       InlineTypeNode* vt = make_uninitialized(*gvn, ft->as_inline_klass(), field_null_free);
-      vt->convert_from_payload(kit, bt, payload, offset, field_null_free, null_marker_offset);
+      vt->convert_from_payload(kit, bt, payload, offset, field_null_free, null_marker_offset, recursively_speculate_non_null);
       value = gvn->transform(vt);
     } else {
       value = get_payload_value(gvn, payload, bt, ft->basic_type(), offset);
@@ -682,7 +714,7 @@ void InlineTypeNode::convert_from_payload(GraphKit* kit, BasicType bt, Node* pay
 
         if (ft->is_inlinetype()) {
           GrowableArray<ciType*> visited;
-          value = make_from_oop_impl(kit, value, ft->as_inline_klass(), visited);
+          value = make_from_oop_impl(kit, value, ft->as_inline_klass(), visited, false, recursively_speculate_non_null);
         }
       }
     }
@@ -1274,13 +1306,13 @@ bool InlineTypeNode::is_all_zero(PhaseGVN* gvn, bool flat) const {
   return true;
 }
 
-InlineTypeNode* InlineTypeNode::make_from_oop(GraphKit* kit, Node* oop, ciInlineKlass* vk, bool is_larval) {
+InlineTypeNode* InlineTypeNode::make_from_oop(GraphKit* kit, Node* oop, ciInlineKlass* vk, bool is_larval, bool recursively_speculate_non_null) {
   GrowableArray<ciType*> visited;
   visited.push(vk);
-  return make_from_oop_impl(kit, oop, vk, visited, is_larval);
+  return make_from_oop_impl(kit, oop, vk, visited, is_larval, recursively_speculate_non_null);
 }
 
-InlineTypeNode* InlineTypeNode::make_from_oop_impl(GraphKit* kit, Node* oop, ciInlineKlass* vk, GrowableArray<ciType*>& visited, bool is_larval) {
+InlineTypeNode* InlineTypeNode::make_from_oop_impl(GraphKit* kit, Node* oop, ciInlineKlass* vk, GrowableArray<ciType*>& visited, bool is_larval, bool recursively_speculate_non_null) {
   PhaseGVN& gvn = kit->gvn();
 
   if (oop->isa_InlineType()) {
@@ -1316,7 +1348,7 @@ InlineTypeNode* InlineTypeNode::make_from_oop_impl(GraphKit* kit, Node* oop, ciI
     Node* init_ctl = kit->control();
     vt->set_is_buffered(gvn);
     vt->set_is_init(gvn);
-    vt->load(kit, oop, oop, vk, visited);
+    vt->load(kit, oop, oop, vk, visited, 0, IN_HEAP | MO_UNORDERED, recursively_speculate_non_null);
     vt->set_is_larval(is_larval);
     vt = gvn.transform(vt)->as_InlineType();
     assert(vt->is_allocated(&gvn), "inline type should be allocated");
@@ -1325,28 +1357,28 @@ InlineTypeNode* InlineTypeNode::make_from_oop_impl(GraphKit* kit, Node* oop, ciI
   }
 
   assert(!is_larval, "larval objects must be non-null");
-  MultiNode* opaque_load = OpaqueInlineTypeLoadNode::make(kit, oop, vk);
+  MultiNode* opaque_load = OpaqueInlineTypeLoadNode::make(kit, oop, vk, recursively_speculate_non_null);
   InlineTypeNode* vt = make_uninitialized(gvn, vk, false);
   vt->set_oop(gvn, gvn.transform(new ProjNode(opaque_load, OpaqueInlineTypeLoadNode::Oop)));
   vt->set_is_buffered(gvn);
   vt->set_req(InlineTypeNode::IsInit, gvn.transform(new ProjNode(opaque_load, OpaqueInlineTypeLoadNode::IsInit)));
   uint base_input = OpaqueInlineTypeLoadNode::Values;
-  vt->initialize_fields(kit, opaque_load, base_input, false, true, nullptr, visited);
+  vt->initialize_fields(kit, opaque_load, base_input, false, true, nullptr, visited, recursively_speculate_non_null);
   vt = gvn.transform(vt)->as_InlineType();
   kit->record_for_igvn(vt);
   return vt;
 }
 
 InlineTypeNode* InlineTypeNode::make_from_flat(GraphKit* kit, ciInlineKlass* vk, Node* obj, Node* ptr, Node* idx, ciInstanceKlass* holder, int holder_offset,
-                                               bool atomic, int null_marker_offset, DecoratorSet decorators) {
+                                               bool atomic, int null_marker_offset, DecoratorSet decorators, bool recursively_speculate_non_null) {
   GrowableArray<ciType*> visited;
   visited.push(vk);
-  return make_from_flat_impl(kit, vk, obj, ptr, idx, holder, holder_offset, atomic, null_marker_offset, decorators, visited);
+  return make_from_flat_impl(kit, vk, obj, ptr, idx, holder, holder_offset, atomic, null_marker_offset, decorators, visited, recursively_speculate_non_null);
 }
 
 // GraphKit wrapper for the 'make_from_flat' method
 InlineTypeNode* InlineTypeNode::make_from_flat_impl(GraphKit* kit, ciInlineKlass* vk, Node* obj, Node* ptr, Node* idx, ciInstanceKlass* holder, int holder_offset,
-                                                    bool atomic, int null_marker_offset, DecoratorSet decorators, GrowableArray<ciType*>& visited) {
+                                                    bool atomic, int null_marker_offset, DecoratorSet decorators, GrowableArray<ciType*>& visited, bool recursively_speculate_non_null) {
   if (kit->gvn().type(obj)->isa_aryptr()) {
     kit->C->set_flat_accesses();
   }
@@ -1458,7 +1490,7 @@ InlineTypeNode* InlineTypeNode::make_from_flat_impl(GraphKit* kit, ciInlineKlass
       kit->set_control(kit->gvn().transform(region));
     }
 
-    vt->convert_from_payload(kit, bt, kit->gvn().transform(payload), 0, null_free, null_marker_offset - holder_offset);
+    vt->convert_from_payload(kit, bt, kit->gvn().transform(payload), 0, null_free, null_marker_offset - holder_offset, recursively_speculate_non_null);
     return kit->gvn().transform(vt)->as_InlineType();
   }
   assert(null_free, "Nullable flat implies atomic");
@@ -1466,12 +1498,12 @@ InlineTypeNode* InlineTypeNode::make_from_flat_impl(GraphKit* kit, ciInlineKlass
   // The inline type is flattened into the object without an oop header. Subtract the
   // offset of the first field to account for the missing header when loading the values.
   holder_offset -= vk->payload_offset();
-  vt->load(kit, obj, ptr, holder, visited, holder_offset, decorators);
+  vt->load(kit, obj, ptr, holder, visited, holder_offset, decorators, recursively_speculate_non_null);
   assert(vt->is_loaded(&kit->gvn()) != obj, "holder oop should not be used as flattened inline type oop");
   return kit->gvn().transform(vt)->as_InlineType();
 }
 
-InlineTypeNode* InlineTypeNode::make_from_multi(GraphKit* kit, MultiNode* multi, ciInlineKlass* vk, uint& base_input, bool in, bool null_free) {
+InlineTypeNode* InlineTypeNode::make_from_multi(GraphKit* kit, MultiNode* multi, ciInlineKlass* vk, uint& base_input, bool in, bool null_free, bool recursively_speculate_non_null) {
   InlineTypeNode* vt = make_uninitialized(kit->gvn(), vk, null_free);
   if (!in) {
     // Keep track of the oop. The returned inline type might already be buffered.
@@ -1480,7 +1512,7 @@ InlineTypeNode* InlineTypeNode::make_from_multi(GraphKit* kit, MultiNode* multi,
   }
   GrowableArray<ciType*> visited;
   visited.push(vk);
-  vt->initialize_fields(kit, multi, base_input, in, null_free, nullptr, visited);
+  vt->initialize_fields(kit, multi, base_input, in, null_free, nullptr, visited,  recursively_speculate_non_null);
   return kit->gvn().transform(vt)->as_InlineType();
 }
 
@@ -1638,7 +1670,7 @@ void InlineTypeNode::pass_fields(GraphKit* kit, Node* n, uint& base_input, bool 
   }
 }
 
-void InlineTypeNode::initialize_fields(GraphKit* kit, MultiNode* multi, uint& base_input, bool in, bool null_free, Node* null_check_region, GrowableArray<ciType*>& visited) {
+void InlineTypeNode::initialize_fields(GraphKit* kit, MultiNode* multi, uint& base_input, bool in, bool null_free, Node* null_check_region, GrowableArray<ciType*>& visited, bool recursive_speculate_non_null) {
   PhaseGVN& gvn = kit->gvn();
   Node* is_init = nullptr;
   if (!null_free) {
@@ -1677,7 +1709,7 @@ void InlineTypeNode::initialize_fields(GraphKit* kit, MultiNode* multi, uint& ba
     if (field_is_flat(i)) {
       // Flat inline type field
       InlineTypeNode* vt = make_uninitialized(gvn, type->as_inline_klass(), field_is_null_free(i));
-      vt->initialize_fields(kit, multi, base_input, in, true, null_check_region, visited);
+      vt->initialize_fields(kit, multi, base_input, in, true, null_check_region, visited, recursive_speculate_non_null);
       if (!field_is_null_free(i)) {
         assert(field_null_marker_offset(i) != -1, "inconsistency");
         Node* is_init = nullptr;
@@ -1722,7 +1754,7 @@ void InlineTypeNode::initialize_fields(GraphKit* kit, MultiNode* multi, uint& ba
         } else if (!parm->is_InlineType()) {
           int old_len = visited.length();
           visited.push(type);
-          parm = make_from_oop_impl(kit, parm, type->as_inline_klass(), visited);
+          parm = make_from_oop_impl(kit, parm, type->as_inline_klass(), visited, false, recursive_speculate_non_null);
           visited.trunc_to(old_len);
         }
       }
@@ -1858,7 +1890,7 @@ void InlineTypeNode::dump_spec(outputStream* st) const {
 }
 #endif // NOT PRODUCT
 
-MultiNode* OpaqueInlineTypeLoadNode::make(GraphKit* kit, Node* oop, ciInlineKlass* vk) {
+MultiNode* OpaqueInlineTypeLoadNode::make(GraphKit* kit, Node* oop, ciInlineKlass* vk, bool speculate_non_null) {
   assert(!vk->is_empty(), "empty types do not need this node");
 
   uint arg_num = 2; // Oop and IsInit
@@ -1899,6 +1931,11 @@ MultiNode* OpaqueInlineTypeLoadNode::make(GraphKit* kit, Node* oop, ciInlineKlas
 
   kit->set_control(gvn.transform(new ProjNode(res, FallThroughControl)));
   kit->set_all_memory(gvn.transform(new ProjNode(res, Memory)));
+  if (speculate_non_null && vk->is_initialized() && !kit->too_many_traps(Deoptimization::Reason_speculate_null_check)) {
+    PreserveJVMState pjvms(kit);
+    kit->set_control(gvn.transform(new ProjNode(res, TrapControl)));
+    kit->uncommon_trap(Deoptimization::Reason_speculate_null_check, Deoptimization::Action_maybe_recompile);
+  }
   return res;
 }
 
@@ -1916,7 +1953,7 @@ void OpaqueInlineTypeLoadNode::expand(PhaseIterGVN& igvn) {
 
   Node* trap_out = proj_out_or_null(TrapControl);
   const Type* oop_type = igvn.type(oop);
-  if (trap_out != nullptr && oop_type->maybe_null() && oop_type != Type::TOP && oop_type->is_ptr()->ptr() != TypePtr::TopPTR && oop_type != TypePtr::NULL_PTR) {
+  if (trap_out != nullptr && !is_useless_after_inline_type_removal(igvn)) {
     // Instead of doing oop == nullptr ? 0 : load(oop, offset), we do oop == nullptr ? trap() : load(oop, offset)
     // This keeps the cfg more linear and easier for the optimizer to work with
     Node* oop_out = proj_out_or_null(Oop);
@@ -2053,7 +2090,7 @@ Node* OpaqueInlineTypeLoadNode::proj_ideal(PhaseGVN* phase, bool can_reshape, Pr
     return res;
   }
 
-  if (is_useless(phase)) {
+  if (is_trivially_useless(*phase)) {
     if (proj->_con == IsInit) {
       return new Conv2BNode(oop);
     } else {
@@ -2098,7 +2135,7 @@ Node* OpaqueInlineTypeLoadNode::proj_identity(PhaseGVN* phase, ProjNode* proj) {
     }
   }
 
-  if (oop_type == TypePtr::NULL_PTR || !oop_type->maybe_null() || is_useless(phase)) {
+  if (oop_type == TypePtr::NULL_PTR || !oop_type->maybe_null() || is_trivially_useless(*phase)) {
     if (proj->_con == FallThroughControl) {
       return in(TypeFunc::Control);
     } else if (proj->_con == TrapControl) {
@@ -2143,14 +2180,63 @@ const Type* OpaqueInlineTypeLoadNode::Value(PhaseGVN* phase) const {
   return current_type;
 }
 
-bool OpaqueInlineTypeLoadNode::is_useless(PhaseGVN* phase) const {
-  if (!phase->is_IterGVN()) {
+bool OpaqueInlineTypeLoadNode::is_trivially_useless(PhaseGVN& gvn) const {
+  if (!gvn.is_IterGVN()) {
     return false;
   }
 
   for (DUIterator_Fast imax, i = fast_outs(imax); i < imax; i++) {
     ProjNode* proj_out = fast_out(i)->as_Proj();
     if (proj_out->_con >= Values) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static bool node_is_useless_after_inline_type_removal(Unique_Node_List& visited, Node* n) {
+  if (visited.member(n)) {
+    return true;
+  }
+
+  visited.push(n);
+  for (DUIterator_Fast imax, i = n->fast_outs(imax); i < imax; i++) {
+    Node* out = n->fast_out(i);
+    if (n->is_OpaqueInlineTypeLoad() && out->as_Proj()->_con < OpaqueInlineTypeLoadNode::Oop) {
+      continue;
+    }
+
+    if (out->is_Phi() || out->is_OpaqueInlineTypeLoad() || out->is_Proj()) {
+      if (!node_is_useless_after_inline_type_removal(visited, out)) {
+        return false;
+      }
+    } else if (out->is_InlineType()) {
+      InlineTypeNode* vt = out->as_InlineType();
+      if (vt->get_oop() == n || vt->get_is_buffered() == n || vt->get_is_init() == n) {
+        if (!node_is_useless_after_inline_type_removal(visited, out)) {
+          return false;
+        }
+      }
+    } else {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool OpaqueInlineTypeLoadNode::is_useless_after_inline_type_removal(PhaseIterGVN& igvn) const {
+  ResourceMark rm;
+  Unique_Node_List visited;
+
+  for (DUIterator_Fast imax, i = fast_outs(imax); i < imax; i++) {
+    ProjNode* proj_out = fast_out(i)->as_Proj();
+    if (proj_out->_con < Values) {
+      continue;
+    }
+
+    if (!node_is_useless_after_inline_type_removal(visited, proj_out)) {
       return false;
     }
   }

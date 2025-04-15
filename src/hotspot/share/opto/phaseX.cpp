@@ -32,6 +32,7 @@
 #include "opto/castnode.hpp"
 #include "opto/cfgnode.hpp"
 #include "opto/idealGraphPrinter.hpp"
+#include "opto/inlinetypenode.hpp"
 #include "opto/loopnode.hpp"
 #include "opto/machnode.hpp"
 #include "opto/opcodes.hpp"
@@ -1344,10 +1345,11 @@ void PhaseIterGVN::remove_globally_dead_node( Node *dead ) {
               }
             } else if (dead->is_data_proj_of_pure_function(in)) {
               _worklist.push(in);
-            } else if (in->is_OpaqueInlineTypeLoad()) {
-              add_users_to_worklist(in);
             } else {
               BarrierSet::barrier_set()->barrier_set_c2()->enqueue_useful_gc_barrier(this, in);
+            }
+            if (in->is_OpaqueInlineTypeLoad() && in->as_OpaqueInlineTypeLoad()->is_trivially_useless(*this)) {
+              add_users_to_worklist(in);
             }
             if (ReduceFieldZeroing && dead->is_Load() && i == MemNode::Memory &&
                 in->is_Proj() && in->in(0) != nullptr && in->in(0)->is_Initialize()) {

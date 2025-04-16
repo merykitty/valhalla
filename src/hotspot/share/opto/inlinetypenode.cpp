@@ -2200,6 +2200,29 @@ static bool node_is_useless_after_inline_type_removal(Unique_Node_List& visited,
     return true;
   }
 
+  auto inline_type_node_can_remove_its_fields = [](Node* n) {
+    for (DUIterator_Fast imax, i = n->fast_outs(imax); i < imax; i++) {
+      Node* out = n->fast_out(i);
+      if (!out->is_SafePoint()) {
+        continue;
+      }
+
+      bool needs_oop = false;
+      for (uint j = 0; j < out->as_SafePoint()->jvms()->debug_start(); j++) {
+        if (out->in(j) == n) {
+          needs_oop = true;
+          break;
+        }
+      }
+
+      if (!needs_oop) {
+        return false;
+      }
+    }
+
+    return true;
+  };
+
   visited.push(n);
   for (DUIterator_Fast imax, i = n->fast_outs(imax); i < imax; i++) {
     Node* out = n->fast_out(i);
@@ -2215,6 +2238,10 @@ static bool node_is_useless_after_inline_type_removal(Unique_Node_List& visited,
       InlineTypeNode* vt = out->as_InlineType();
       if (vt->get_oop() == n || vt->get_is_buffered() == n || vt->get_is_init() == n) {
         if (!node_is_useless_after_inline_type_removal(visited, out)) {
+          return false;
+        }
+      } else {
+        if (!inline_type_node_can_remove_its_fields(out)) {
           return false;
         }
       }

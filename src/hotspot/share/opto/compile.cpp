@@ -74,6 +74,7 @@
 #include "opto/output.hpp"
 #include "opto/parse.hpp"
 #include "opto/phaseX.hpp"
+#include "opto/phasetype.hpp"
 #include "opto/rootnode.hpp"
 #include "opto/runtime.hpp"
 #include "opto/stringopts.hpp"
@@ -2994,6 +2995,22 @@ void Compile::Optimize() {
   C->clear_major_progress(); // ensure that major progress is now clear
 
   process_for_post_loop_opts_igvn(igvn);
+
+  {
+    // After many optimizations, an InlineTypeNode being pushed down through Phis will have its
+    // IsBuffered and IsInit inputs being Phis. It is then very hard for GVN to prove that such
+    // Phis are constant 1. Luckily, CCP can make quick work of that case. This is necessary to
+    // ensure that InlineTypeNode removal only encounters buffered InlineTypeNode.
+    TracePhase tp(_t_ccp);
+    PhaseCCP ccp(&igvn);
+    ccp.do_transform();
+    igvn.reset_from_igvn(&ccp);
+    igvn.optimize();
+    if (failing()) {
+      return;
+    }
+    print_method(PHASE_CCP1, 2);
+  }
 
   process_for_merge_stores_igvn(igvn);
 

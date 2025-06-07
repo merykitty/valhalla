@@ -4158,12 +4158,11 @@ public class TestLWorld {
         Asserts.assertEquals(test150(), testValue2.hash());
     }
 
-// TODO 8336003 This triggers #  assert(false) failed: Should have been buffered
-/*
-    // Same as test150 but with val not being allocated in the scope of the method
+    // Same as test150 but with a real loop and val not being allocated in the scope of the method
     @Test
-    @IR(failOn = {compiler.lib.ir_framework.IRNode.DYNAMIC_CALL_OF_METHOD, "MyValue2::hash"},
-        counts = {compiler.lib.ir_framework.IRNode.STATIC_CALL_OF_METHOD, "MyValue2::hash", "= 1"})
+
+    // @IR(failOn = {compiler.lib.ir_framework.IRNode.DYNAMIC_CALL_OF_METHOD, "MyValue2::hash"},
+    //     counts = {compiler.lib.ir_framework.IRNode.STATIC_CALL_OF_METHOD, "MyValue2::hash", "= 1"})
     public long test151(MyValue2 val) {
         MyAbstract receiver = MyValue1.createWithFieldsInline(rI, rL);
 
@@ -4182,7 +4181,6 @@ public class TestLWorld {
     public void test151_verifier() {
         Asserts.assertEquals(test151(testValue2), testValue2.hash());
     }
-*/
 
     static interface MyInterface2 {
         public int val();

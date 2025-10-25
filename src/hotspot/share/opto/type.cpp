@@ -51,6 +51,7 @@
 #include "utilities/globalDefinitions.hpp"
 #include "utilities/powerOfTwo.hpp"
 #include "utilities/stringUtils.hpp"
+#include "utilities/tribool.hpp"
 
 // Portions of code courtesy of Clifford Click
 
@@ -2387,6 +2388,32 @@ inline const TypeInt* normalize_array_size(const TypeInt* size) {
     return size;
 }
 
+TypeArrayProperties TypeArrayProperties::make(TriBool flat, TriBool null_free, TriBool atomic) {
+  TypeArrayProperties res = bottom();
+  if (!flat.is_default()) {
+    if (flat) {
+      res = res.set_flat();
+    } else {
+      res = res.set_not_flat();
+    }
+  }
+  if (!null_free.is_default()) {
+    if (null_free) {
+      res = res.set_null_free();
+    } else {
+      res = res.set_not_null_free();
+    }
+  }
+  if (!atomic.is_default()) {
+    if (atomic) {
+      res = res.set_atomic();
+    } else {
+      res = res.set_not_atomic();
+    }
+  }
+  return res;
+}
+
 //------------------------------make-------------------------------------------
 const TypeAry* TypeAry::make(const Type* elem, const TypeInt* size, bool stable,
                              bool flat, bool not_flat, bool not_null_free, bool atomic) {
@@ -2394,7 +2421,67 @@ const TypeAry* TypeAry::make(const Type* elem, const TypeInt* size, bool stable,
     elem = elem->make_narrowoop();
   }
   size = normalize_array_size(size);
-  return (TypeAry*)(new TypeAry(elem, size, stable, flat, not_flat, not_null_free, atomic))->hashcons();
+
+  assert(!flat || !not_flat, "inconsistency");
+  TriBool flat_prob = flat ? TriBool(true) : (not_flat ? TriBool(false) : TriBool());
+  TriBool null_free_prob = not_null_free ? TriBool(false) : TriBool();
+  TriBool atomic_prob = atomic ? TriBool(true) : TriBool();
+  TypeArrayProperties properties = TypeArrayProperties::make(flat_prob, null_free_prob, atomic_prob);
+  return make(elem, size, stable, properties);
+}
+
+static TypeArrayProperties normalize_array_properties(const Type* elem, TypeArrayProperties properties) {
+  if (is_integral_type(elem->basic_type()) || is_floating_point_type(elem->basic_type())) {
+    properties = properties.set_not_flat().set_not_null_free().set_atomic();
+  } else if (elem->isa_ptr()) {
+    const TypePtr* elem_ptr = elem->make_ptr();
+    const TypeKlassPtr* component;
+    if (elem_ptr->isa_oop_ptr()) {
+      component = elem_ptr->is_oopptr()->as_klass_type();
+    } else {
+      component = elem_ptr->is_klassptr();
+    }
+    if (!component->is_loaded() || !component->can_be_inline_type()) {
+      // Arrays of unloaded types or types that are be inline type cannot be flat
+      properties = properties.set_not_flat();
+    } else if (component->is_inlinetypeptr()) {
+      // If we know the exact type, there can only be a few possible cases
+      ciInlineKlass* evk = component->inline_klass();
+
+      if (!elem->maybe_null()) {
+        properties = properties.set_null_free();
+      }
+
+      if (!evk->has_non_atomic_layout()) {
+        properties = properties.set_atomic();
+      }
+
+      if (evk->has_nullable_atomic_layout()) {
+        // All array layouts of this type are flat
+        properties = properties.set_flat();
+      } else if (evk->has_atomic_layout() && properties.is_null_free()) {
+        // All null-free array layouts of this type are flat
+        properties = properties.set_flat();
+      }
+
+      if (!evk->has_atomic_layout() && !evk->has_non_atomic_layout()) {
+        // This type is not LooselyConsistent and is too big for atomic flat accesses
+        properties = properties.set_not_flat();
+      } else if (!evk->has_atomic_layout() && properties.is_atomic()) {
+        // This type is too big for atomic flat accesses
+        properties = properties.set_not_flat();
+      } else if (!evk->has_nullable_atomic_layout() && properties.is_not_null_free()) {
+        // The nullable array cannot be flat
+        properties = properties.set_not_flat();
+      }
+    }
+  }
+  assert(!properties.is_empty(), "inconsistency");
+  return properties;
+}
+
+const TypeAry* TypeAry::make(const Type* elem, const TypeInt* size, bool stable, TypeArrayProperties properties) {
+  return (TypeAry*)(new TypeAry(elem, size, stable, normalize_array_properties(elem, properties)))->hashcons();
 }
 
 //------------------------------meet-------------------------------------------
@@ -2422,10 +2509,7 @@ const Type *TypeAry::xmeet( const Type *t ) const {
     }
     return TypeAry::make(_elem->meet_speculative(a->_elem),
                          isize, _stable && a->_stable,
-                         _flat && a->_flat,
-                         _not_flat && a->_not_flat,
-                         _not_null_free && a->_not_null_free,
-                         _atomic && a->_atomic);
+                         _properties.meet(a->_properties));
   }
   case Top:
     break;
@@ -2438,7 +2522,7 @@ const Type *TypeAry::xmeet( const Type *t ) const {
 const Type *TypeAry::xdual() const {
   const TypeInt* size_dual = _size->dual()->is_int();
   size_dual = normalize_array_size(size_dual);
-  return new TypeAry(_elem->dual(), size_dual, !_stable, !_flat, !_not_flat, !_not_null_free, !_atomic);
+  return new TypeAry(_elem->dual(), size_dual, !_stable, _properties.complement());
 }
 
 //------------------------------eq---------------------------------------------
@@ -2448,32 +2532,28 @@ bool TypeAry::eq( const Type *t ) const {
   return _elem == a->_elem &&
     _stable == a->_stable &&
     _size == a->_size &&
-    _flat == a->_flat &&
-    _not_flat == a->_not_flat &&
-    _not_null_free == a->_not_null_free &&
-    _atomic == a->_atomic;
+    _properties == a->_properties;
 
 }
 
 //------------------------------hash-------------------------------------------
 // Type-specific hashing function.
 uint TypeAry::hash(void) const {
-  return (uint)(uintptr_t)_elem + (uint)(uintptr_t)_size + (uint)(_stable ? 43 : 0) +
-      (uint)(_flat ? 44 : 0) + (uint)(_not_flat ? 45 : 0) + (uint)(_not_null_free ? 46 : 0) + (uint)(_atomic ? 47 : 0);
+  return (uint)(uintptr_t)_elem + (uint)(uintptr_t)_size + (uint)(_stable ? 43 : 0) + _properties.hash();
 }
 
 /**
  * Return same type without a speculative part in the element
  */
 const TypeAry* TypeAry::remove_speculative() const {
-  return make(_elem->remove_speculative(), _size, _stable, _flat, _not_flat, _not_null_free, _atomic);
+  return make(_elem->remove_speculative(), _size, _stable, _properties);
 }
 
 /**
  * Return same type with cleaned up speculative part of element
  */
 const Type* TypeAry::cleanup_speculative() const {
-  return make(_elem->cleanup_speculative(), _size, _stable, _flat, _not_flat, _not_null_free, _atomic);
+  return make(_elem->cleanup_speculative(), _size, _stable, _properties);
 }
 
 /**
@@ -2492,12 +2572,12 @@ const TypePtr* TypePtr::with_inline_depth(int depth) const {
 #ifndef PRODUCT
 void TypeAry::dump2( Dict &d, uint depth, outputStream *st ) const {
   if (_stable)  st->print("stable:");
-  if (_flat) st->print("flat:");
+  if (_properties.is_flat()) st->print("flat:");
   if (Verbose) {
-    if (_not_flat) st->print("not flat:");
-    if (_not_null_free) st->print("not null free:");
+    if (_properties.is_not_flat()) st->print("not flat:");
+    if (_properties.is_not_null_free()) st->print("not null free:");
   }
-  if (_atomic) st->print("atomic:");
+  if (_properties.is_atomic()) st->print("atomic:");
   _elem->dump2(d, depth, st);
   st->print("[");
   _size->dump2(d, depth, st);
@@ -5301,7 +5381,7 @@ const Type *TypeAryPtr::xmeet_helper(const Type *t) const {
       instance_id = InstanceBot;
     } else if (this->is_flat() != tap->is_flat()) {
       // Meeting flat inline type array with non-flat array. Adjust (field) offset accordingly.
-      if (tary->_flat) {
+      if (tary->_properties.is_flat()) {
         // Result is in a flat representation
         off = Offset(is_flat() ? offset() : tap->offset());
         field_off = is_flat() ? field_offset() : tap->field_offset();
@@ -6592,8 +6672,18 @@ bool TypeAryPtr::can_be_inline_array() const {
   return elem()->make_ptr() && elem()->make_ptr()->isa_instptr() && elem()->make_ptr()->is_instptr()->_klass->can_be_inline_klass();
 }
 
+const TypeAryKlassPtr* TypeAryKlassPtr::make(PTR ptr, const Type* elem, ciKlass* k, Offset offset, TypeArrayProperties properties, bool vm_type) {
+  return (TypeAryKlassPtr*)(new TypeAryKlassPtr(ptr, elem, k, offset, normalize_array_properties(elem, properties), vm_type))->hashcons();
+}
+
 const TypeAryKlassPtr *TypeAryKlassPtr::make(PTR ptr, const Type* elem, ciKlass* k, Offset offset, bool not_flat, bool not_null_free, bool flat, bool null_free, bool atomic, bool vm_type) {
-  return (TypeAryKlassPtr*)(new TypeAryKlassPtr(ptr, elem, k, offset, not_flat, not_null_free, flat, null_free, atomic, vm_type))->hashcons();
+  assert(!flat || !not_flat, "inconsistency");
+  TriBool flat_prob = flat ? TriBool(true) : (not_flat ? TriBool(false) : TriBool());
+  assert(!null_free || !not_null_free, "inconsistency");
+  TriBool null_free_prob = null_free ? TriBool(true) : (not_null_free ? TriBool(false) : TriBool());
+  TriBool atomic_prob = atomic ? TriBool(true) : TriBool();
+  TypeArrayProperties properties = TypeArrayProperties::make(flat_prob, null_free_prob, atomic_prob);
+  return make(ptr, elem, k, offset, properties, vm_type);
 }
 
 const TypeAryKlassPtr* TypeAryKlassPtr::make(PTR ptr, ciKlass* k, Offset offset, InterfaceHandling interface_handling, bool not_flat, bool not_null_free, bool flat, bool null_free, bool atomic, bool vm_type) {
@@ -6655,11 +6745,7 @@ bool TypeAryKlassPtr::eq(const Type *t) const {
   const TypeAryKlassPtr *p = t->is_aryklassptr();
   return
     _elem == p->_elem &&  // Check array
-    _flat == p->_flat &&
-    _not_flat == p->_not_flat &&
-    _null_free == p->_null_free &&
-    _not_null_free == p->_not_null_free &&
-    _atomic == p->_atomic &&
+    _properties == p->_properties &&
     _vm_type == p->_vm_type &&
     TypeKlassPtr::eq(p);  // Check sub-parts
 }
@@ -6667,8 +6753,7 @@ bool TypeAryKlassPtr::eq(const Type *t) const {
 //------------------------------hash-------------------------------------------
 // Type-specific hashing function.
 uint TypeAryKlassPtr::hash(void) const {
-  return (uint)(uintptr_t)_elem + TypeKlassPtr::hash() + (uint)(_not_flat ? 43 : 0) +
-      (uint)(_not_null_free ? 44 : 0) + (uint)(_flat ? 45 : 0) + (uint)(_null_free ? 46 : 0)  + (uint)(_atomic ? 47 : 0) + (uint)(_vm_type ? 48 : 0);
+  return (uint)(uintptr_t)_elem + TypeKlassPtr::hash() + _properties.hash() + (uint)(_vm_type ? 48 : 0);
 }
 
 //----------------------compute_klass------------------------------------------
@@ -6762,18 +6847,18 @@ const Type* TypeAryPtr::base_element_type(int& dims) const {
 //------------------------------add_offset-------------------------------------
 // Access internals of klass object
 const TypePtr* TypeAryKlassPtr::add_offset(intptr_t offset) const {
-  return make(_ptr, elem(), klass(), xadd_offset(offset), is_not_flat(), is_not_null_free(), _flat, _null_free, _atomic, _vm_type);
+  return make(_ptr, elem(), klass(), xadd_offset(offset), _properties, _vm_type);
 }
 
 const TypeAryKlassPtr* TypeAryKlassPtr::with_offset(intptr_t offset) const {
-  return make(_ptr, elem(), klass(), Offset(offset), is_not_flat(), is_not_null_free(), _flat, _null_free, _atomic, _vm_type);
+  return make(_ptr, elem(), klass(), Offset(offset), _properties, _vm_type);
 }
 
 //------------------------------cast_to_ptr_type-------------------------------
 const TypeAryKlassPtr* TypeAryKlassPtr::cast_to_ptr_type(PTR ptr) const {
   assert(_base == AryKlassPtr, "subclass must override cast_to_ptr_type");
   if (ptr == _ptr) return this;
-  return make(ptr, elem(), _klass, _offset, is_not_flat(), is_not_null_free(), _flat, _null_free, _atomic, _vm_type);
+  return make(ptr, elem(), _klass, _offset, _properties, _vm_type);
 }
 
 bool TypeAryKlassPtr::must_be_exact() const {
@@ -6821,7 +6906,7 @@ const TypeKlassPtr *TypeAryKlassPtr::cast_to_exactness(bool klass_is_exact) cons
       not_flat = !UseArrayFlattening || not_inline || (exact_etype->is_inlinetypeptr() && !exact_etype->inline_klass()->maybe_flat_in_array());
     }
   }
-  return make(klass_is_exact ? Constant : NotNull, elem, k, _offset, not_flat, not_null_free, _flat, _null_free, _atomic, _vm_type);
+  return make(klass_is_exact ? Constant : NotNull, elem, k, _offset, not_flat, not_null_free, is_flat(), is_null_free(), is_atomic(), _vm_type);
 }
 
 //-----------------------------as_instance_type--------------------------------
@@ -6837,7 +6922,7 @@ const TypeOopPtr* TypeAryKlassPtr::as_instance_type(bool klass_change) const {
   } else {
     el = elem();
   }
-  bool null_free = _null_free;
+  bool null_free = is_null_free();
   if (null_free && el->isa_ptr()) {
     el = el->is_ptr()->join_speculative(TypePtr::NOTNULL);
   }
@@ -6931,39 +7016,39 @@ const Type    *TypeAryKlassPtr::xmeet( const Type *t ) const {
     MeetResult res = meet_aryptr(ptr, elem, this, tap,
                                  res_klass, res_xk, res_flat, res_not_flat, res_not_null_free, res_atomic);
     assert(res_xk == (ptr == Constant), "");
-    bool flat = meet_flat(tap->_flat);
-    bool null_free = meet_null_free(tap->_null_free);
-    bool atomic = meet_atomic(tap->_atomic);
+    TypeArrayProperties properties = _properties.meet(tap->_properties);
     bool vm_type = _vm_type && tap->_vm_type;
     if (res == NOT_SUBTYPE) {
-      flat = false;
-      null_free = false;
-      atomic = false;
+      properties = TypeArrayProperties::bottom();
       vm_type = false;
     } else if (res == SUBTYPE) {
       if (above_centerline(tap->ptr()) && !above_centerline(this->ptr())) {
-        flat = _flat;
-        null_free = _null_free;
-        atomic = _atomic;
+        properties = _properties;
         vm_type = _vm_type;
       } else if (above_centerline(this->ptr()) && !above_centerline(tap->ptr())) {
-        flat = tap->_flat;
-        null_free = tap->_null_free;
-        atomic = tap->_atomic;
+        properties = tap->_properties;
         vm_type = tap->_vm_type;
       } else if (above_centerline(this->ptr()) && above_centerline(tap->ptr())) {
-        flat = _flat || tap->_flat;
-        null_free = _null_free || tap->_null_free;
-        atomic = _atomic || tap->_atomic;
+        properties = _properties.join(tap->_properties);
         vm_type = _vm_type || tap->_vm_type;
       }
+    }
+
+    if (res_not_flat) {
+      properties = properties.set_not_flat();
+    }
+    if (res_not_null_free) {
+      properties = properties.set_not_null_free();
+    }
+    if (res_atomic) {
+      properties = properties.set_atomic();
     }
     if (res_xk && _vm_type != tap->_vm_type) {
       // This can happen if the phi emitted by LibraryCallKit::load_default_refined_array_klass is folded
       // before the typeArray guard is folded. Keep the information that this is a refined klass pointer.
       vm_type = true;
     }
-    return make(ptr, elem, res_klass, off, res_not_flat, res_not_null_free, flat, null_free, atomic, vm_type);
+    return make(ptr, elem, res_klass, off, properties, vm_type);
   } // End of case KlassPtr
   case InstKlassPtr: {
     const TypeInstKlassPtr *tp = t->is_instklassptr();
@@ -7142,7 +7227,7 @@ bool TypeAryKlassPtr::maybe_java_subtype_of_helper(const TypeKlassPtr* other, bo
 //------------------------------xdual------------------------------------------
 // Dual: compute field-by-field dual
 const Type    *TypeAryKlassPtr::xdual() const {
-  return new TypeAryKlassPtr(dual_ptr(), elem()->dual(), klass(), dual_offset(), !is_not_flat(), !is_not_null_free(), dual_flat(), dual_null_free(), dual_atomic(), _vm_type);
+  return new TypeAryKlassPtr(dual_ptr(), elem()->dual(), klass(), dual_offset(), _properties, _vm_type);
 }
 
 // Is there a single ciKlass* that can represent that type?
@@ -7199,13 +7284,13 @@ void TypeAryKlassPtr::dump2( Dict & d, uint depth, outputStream *st ) const {
   default:
     break;
   }
-  if (_flat) st->print(":flat");
-  if (_null_free) st->print(":null free");
-  if (_atomic) st->print(":atomic");
+  if (is_flat()) st->print(":flat");
+  if (is_null_free()) st->print(":null free");
+  if (is_atomic()) st->print(":atomic");
   if (_vm_type) st->print(":vm_type");
   if (Verbose) {
-    if (_not_flat) st->print(":not flat");
-    if (_not_null_free) st->print(":nullable");
+    if (is_not_flat()) st->print(":not flat");
+    if (is_not_null_free()) st->print(":nullable");
   }
 
   _offset.dump2(st);

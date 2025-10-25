@@ -1006,11 +1006,101 @@ public:
 #endif
 };
 
+// The set of possible combinations of the properties of an array. It is represented as a bit set
+// with 1 bit for each combination (such as flat + null_free + atomic).
+class TypeArrayProperties {
+private:
+  using PayloadType = uint8_t;
+
+  PayloadType _payload;
+
+  static constexpr PayloadType _bit_non_flat_non_null_free_atomic = 1;
+  static constexpr PayloadType _bit_non_flat_null_free_atomic     = 1 << 1;
+  static constexpr PayloadType _bit_flat_non_null_free_atomic     = 1 << 2;
+  static constexpr PayloadType _bit_flat_null_free_atomic         = 1 << 3;
+  static constexpr PayloadType _bit_flat_null_free_non_atomic     = 1 << 4;
+  static constexpr PayloadType _bits_universe                     = (1 << 5) - 1;
+
+  constexpr explicit TypeArrayProperties(PayloadType payload) : _payload(payload & _bits_universe) {}
+
+public:
+  static TypeArrayProperties make(TriBool flat, TriBool null_free, TriBool atomic);
+  static constexpr TypeArrayProperties bottom() { return TypeArrayProperties(_bits_universe); }
+
+  TypeArrayProperties complement()               const { return TypeArrayProperties(_payload ^ _bits_universe); }
+  TypeArrayProperties meet(TypeArrayProperties o) const { return TypeArrayProperties(_payload | o._payload); }
+  TypeArrayProperties join(TypeArrayProperties o) const { return TypeArrayProperties(_payload & o._payload); }
+
+  TypeArrayProperties set_flat() const {
+    constexpr PayloadType may_not_flat = _bit_non_flat_non_null_free_atomic | _bit_non_flat_null_free_atomic;
+    return TypeArrayProperties(_payload &~ may_not_flat);
+  }
+
+  TypeArrayProperties set_not_flat() const {
+    constexpr PayloadType may_flat = _bit_flat_non_null_free_atomic | _bit_flat_null_free_atomic | _bit_flat_null_free_atomic;
+    return TypeArrayProperties(_payload &~ may_flat);
+  }
+
+  TypeArrayProperties set_null_free() const {
+    constexpr PayloadType may_not_null_free = _bit_non_flat_non_null_free_atomic | _bit_flat_non_null_free_atomic;
+    return TypeArrayProperties(_payload &~ may_not_null_free);
+  }
+
+  TypeArrayProperties set_not_null_free() const {
+    constexpr PayloadType may_null_free = _bit_non_flat_null_free_atomic | _bit_flat_null_free_atomic | _bit_flat_null_free_non_atomic;
+    return TypeArrayProperties(_payload &~ may_null_free);
+  }
+
+  TypeArrayProperties set_atomic() const {
+    return TypeArrayProperties(_payload &~ _bit_flat_null_free_non_atomic);
+  }
+
+  TypeArrayProperties set_not_atomic() const {
+    return TypeArrayProperties(_payload & _bit_flat_null_free_non_atomic);
+  }
+
+  bool is_empty() const {
+    return _payload == 0;
+  }
+
+  bool is_flat() const {
+    constexpr PayloadType may_not_flat = _bit_non_flat_non_null_free_atomic | _bit_non_flat_null_free_atomic;
+    return (_payload & may_not_flat) == 0;
+  }
+
+  bool is_not_flat() const {
+    constexpr PayloadType may_flat = _bit_flat_non_null_free_atomic | _bit_flat_null_free_atomic | _bit_flat_null_free_atomic;
+    return (_payload & may_flat) == 0;
+  }
+
+  bool is_null_free() const {
+    constexpr PayloadType may_not_null_free = _bit_non_flat_non_null_free_atomic | _bit_flat_non_null_free_atomic;
+    return (_payload & may_not_null_free) == 0;
+  }
+
+  bool is_not_null_free() const {
+    constexpr PayloadType may_null_free = _bit_non_flat_null_free_atomic | _bit_flat_null_free_atomic | _bit_flat_null_free_non_atomic;
+    return (_payload & may_null_free) == 0;
+  }
+
+  bool is_atomic() const {
+    return (_payload & _bit_flat_null_free_non_atomic) == 0;
+  }
+
+  bool is_not_atomic() const {
+    return (_payload & _bit_flat_null_free_non_atomic) == _payload;
+  }
+
+  uint hash() const { return _payload; }
+
+  bool operator==(TypeArrayProperties o) const { return _payload == o._payload; }
+};
+
 //------------------------------TypeAry----------------------------------------
 // Class of Array Types
 class TypeAry : public Type {
-  TypeAry(const Type* elem, const TypeInt* size, bool stable, bool flat, bool not_flat, bool not_null_free, bool atomic) : Type(Array),
-      _elem(elem), _size(size), _stable(stable), _flat(flat), _not_flat(not_flat), _not_null_free(not_null_free), _atomic(atomic) {}
+  TypeAry(const Type* elem, const TypeInt* size, bool stable, TypeArrayProperties properties) : Type(Array),
+      _elem(elem), _size(size), _stable(stable), _properties(properties) {}
 public:
   virtual bool eq( const Type *t ) const;
   virtual uint hash() const;             // Type specific hashing
@@ -1023,14 +1113,12 @@ private:
   const bool _stable;           // Are elements @Stable?
 
   // Inline type array properties
-  const bool _flat;             // Array is flat
-  const bool _not_flat;         // Array is never flat
-  const bool _not_null_free;    // Array is never null-free
-  const bool _atomic;           // Array is atomic
+  const TypeArrayProperties _properties;
 
   friend class TypeAryPtr;
 
 public:
+  static const TypeAry* make(const Type* elem, const TypeInt* size, bool stable, TypeArrayProperties properties);
   static const TypeAry* make(const Type* elem, const TypeInt* size, bool stable = false,
                              bool flat = false, bool not_flat = false, bool not_null_free = false, bool atomic = false);
 
@@ -1726,11 +1814,11 @@ public:
   bool      is_stable() const { return _ary->_stable; }
 
   // Inline type array properties
-  bool is_flat()          const { return _ary->_flat; }
-  bool is_not_flat()      const { return _ary->_not_flat; }
-  bool is_null_free()     const { return _ary->_elem->make_ptr() != nullptr && (_ary->_elem->make_ptr()->ptr() == NotNull || _ary->_elem->make_ptr()->ptr() == AnyNull); }
-  bool is_not_null_free() const { return _ary->_not_null_free; }
-  bool is_atomic()        const { return _ary->_atomic; }
+  bool is_flat()          const { return _ary->_properties.is_flat(); }
+  bool is_not_flat()      const { return _ary->_properties.is_not_flat(); }
+  bool is_null_free()     const { return _ary->_properties.is_null_free(); }
+  bool is_not_null_free() const { return _ary->_properties.is_not_null_free(); }
+  bool is_atomic()        const { return _ary->_properties.is_atomic(); }
 
   bool is_autobox_cache() const { return _is_autobox_cache; }
 
@@ -2055,16 +2143,12 @@ class TypeAryKlassPtr : public TypeKlassPtr {
   friend class TypePtr;
 
   const Type *_elem;
-  const bool _not_flat;      // Array is never flat
-  const bool _not_null_free; // Array is never null-free
-  const bool _flat;
-  const bool _null_free;
-  const bool _atomic;
+  const TypeArrayProperties _properties;
   const bool _vm_type;
 
   static const TypeInterfaces* _array_interfaces;
-  TypeAryKlassPtr(PTR ptr, const Type *elem, ciKlass* klass, Offset offset, bool not_flat, int not_null_free, bool flat, bool null_free, bool atomic, bool vm_type)
-    : TypeKlassPtr(AryKlassPtr, ptr, klass, _array_interfaces, offset), _elem(elem), _not_flat(not_flat), _not_null_free(not_null_free), _flat(flat), _null_free(null_free), _atomic(atomic), _vm_type(vm_type) {
+  TypeAryKlassPtr(PTR ptr, const Type *elem, ciKlass* klass, Offset offset, TypeArrayProperties properties, bool vm_type)
+    : TypeKlassPtr(AryKlassPtr, ptr, klass, _array_interfaces, offset), _elem(elem), _properties(properties), _vm_type(vm_type) {
     assert(klass == nullptr || klass->is_type_array_klass() || klass->is_flat_array_klass() || !klass->as_obj_array_klass()->base_element_klass()->is_interface(), "");
   }
 
@@ -2073,30 +2157,6 @@ class TypeAryKlassPtr : public TypeKlassPtr {
   virtual ciKlass* klass() const;
 
   virtual bool must_be_exact() const;
-
-  bool dual_flat() const {
-    return _flat;
-  }
-
-  bool meet_flat(bool other) const {
-    return _flat && other;
-  }
-
-  bool dual_null_free() const {
-    return _null_free;
-  }
-
-  bool meet_null_free(bool other) const {
-    return _null_free && other;
-  }
-
-  bool dual_atomic() const {
-    return _atomic;
-  }
-
-  bool meet_atomic(bool other) const {
-    return _atomic && other;
-  }
 
 public:
 
@@ -2111,6 +2171,7 @@ public:
 
   bool  is_loaded() const { return (_elem->isa_klassptr() ? _elem->is_klassptr()->is_loaded() : true); }
 
+  static const TypeAryKlassPtr* make(PTR ptr, const Type* elem, ciKlass* k, Offset offset, TypeArrayProperties properties, bool vm_type);
   static const TypeAryKlassPtr* make(PTR ptr, const Type* elem, ciKlass* k, Offset offset, bool not_flat, bool not_null_free, bool flat, bool null_free, bool atomic, bool vm_type = false);
   static const TypeAryKlassPtr* make(PTR ptr, ciKlass* k, Offset offset, InterfaceHandling interface_handling, bool vm_type = false);
   static const TypeAryKlassPtr* make(ciKlass* klass, InterfaceHandling interface_handling, bool vm_type = false);
@@ -2139,11 +2200,11 @@ public:
     return TypeKlassPtr::empty() || _elem->empty();
   }
 
-  bool is_flat()          const { return _flat; }
-  bool is_not_flat()      const { return _not_flat; }
-  bool is_null_free()     const { return _null_free; }
-  bool is_not_null_free() const { return _not_null_free; }
-  bool is_atomic()        const { return _atomic; }
+  bool is_flat()          const { return _properties.is_flat(); }
+  bool is_not_flat()      const { return _properties.is_not_flat(); }
+  bool is_null_free()     const { return _properties.is_null_free(); }
+  bool is_not_null_free() const { return _properties.is_not_null_free(); }
+  bool is_atomic()        const { return _properties.is_atomic(); }
   bool is_vm_type()       const { return _vm_type; }
   virtual bool can_be_inline_array() const;
 

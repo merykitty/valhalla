@@ -488,7 +488,7 @@ class Parse : public GraphKit {
   void do_one_bytecode();
 
   // helper function to generate array store check
-  Node* array_store_check(Node*& adr, const Type*& elemtype);
+  Node* array_store_check(const Type*& elemtype);
   // Helper function to generate array load
   void array_load(BasicType etype);
   Node* load_from_unknown_flat_array(Node* array, Node* array_index, const TypeOopPtr* element_ptr);
@@ -496,7 +496,7 @@ class Parse : public GraphKit {
   void array_store(BasicType etype);
   void store_to_unknown_flat_array(Node* array, Node* idx, Node* non_null_stored_value);
   // Helper function to compute array addressing
-  Node* array_addressing(BasicType type, int vals, const Type*& elemtype);
+  void array_access_preprocess(int idx_depth, const Type*& elemtype);
   bool needs_range_check(const TypeInt* size_type, const Node* index) const;
   Node* create_speculative_inline_type_array_checks(Node* array, const TypeAryPtr* array_type, const Type*& element_type);
   Node* cast_to_speculative_array_type(Node* array, const TypeAryPtr*& array_type, const Type*& element_type);

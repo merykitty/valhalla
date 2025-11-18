@@ -73,8 +73,10 @@ Node* Parse::record_profile_for_speculation_at_array_load(Node* ld) {
 //---------------------------------array_load----------------------------------
 void Parse::array_load(BasicType bt) {
   const Type* elemtype = Type::TOP;
-  Node* adr = array_addressing(bt, 0, elemtype);
-  if (stopped())  return;     // guaranteed null or range check
+  array_access_preprocess(0, elemtype);
+  if (stopped()) {
+    return;
+  }
 
   Node* array_index = pop();
   Node* array = pop();
@@ -103,6 +105,7 @@ void Parse::array_load(BasicType bt) {
           // possibly float above the range check at any point.
           decorator_set |= C2_UNKNOWN_CONTROL_LOAD;
         }
+        Node* adr = array_element_address(array, array_index, bt, array_type->size(), control());
         Node* ld = access_load_at(array, adr, adr_type, element_ptr, bt, decorator_set);
         if (element_ptr->is_inlinetypeptr()) {
           ld = InlineTypeNode::make_from_oop(this, ld, element_ptr->inline_klass());
@@ -143,6 +146,7 @@ void Parse::array_load(BasicType bt) {
     bt = T_BOOLEAN;
   }
   const TypeAryPtr* adr_type = TypeAryPtr::get_array_body_type(bt);
+  Node* adr = array_element_address(array, array_index, bt, array_type->size(), control());
   Node* ld = access_load_at(array, adr, adr_type, elemtype, bt,
                             IN_HEAP | IS_ARRAY | C2_CONTROL_DEPENDENT_LOAD);
   ld = record_profile_for_speculation_at_array_load(ld);
@@ -186,11 +190,13 @@ Node* Parse::load_from_unknown_flat_array(Node* array, Node* array_index, const 
 //--------------------------------array_store----------------------------------
 void Parse::array_store(BasicType bt) {
   const Type* elemtype = Type::TOP;
-  Node* adr = array_addressing(bt, type2size[bt], elemtype);
-  if (stopped())  return;     // guaranteed null or range check
+  array_access_preprocess(type2size[bt], elemtype);
+  if (stopped()) {
+    return;
+  }
   Node* stored_value_casted = nullptr;
   if (bt == T_OBJECT) {
-    stored_value_casted = array_store_check(adr, elemtype);
+    stored_value_casted = array_store_check(elemtype);
     if (stopped()) {
       return;
     }
@@ -249,6 +255,7 @@ void Parse::array_store(BasicType bt) {
           sync_kit(ideal);
           assert(array_type->is_flat() || ideal.ctrl()->in(0)->as_If()->is_flat_array_check(&_gvn), "Should be found");
           inc_sp(3);
+          Node* adr = array_element_address(array, array_index, bt, array_type->size(), control());
           access_store_at(array, adr, adr_type, stored_value_casted, elemtype, bt, MO_UNORDERED | IN_HEAP | IS_ARRAY, false);
           dec_sp(3);
           ideal.sync_kit(this);
@@ -297,6 +304,7 @@ void Parse::array_store(BasicType bt) {
     }
   }
   inc_sp(3);
+  Node* adr = array_element_address(array, array_index, bt, array_type->size(), control());
   access_store_at(array, adr, adr_type, stored_value, elemtype, bt, MO_UNORDERED | IN_HEAP | IS_ARRAY);
   dec_sp(3);
 }
@@ -327,19 +335,18 @@ void Parse::store_to_unknown_flat_array(Node* array, Node* const idx, Node* non_
   insert_mem_bar_volatile(Op_MemBarCPUOrder, C->get_alias_index(TypeAryPtr::INLINES));
 }
 
-//------------------------------array_addressing-------------------------------
-// Pull array and index from the stack.  Compute pointer-to-element.
-Node* Parse::array_addressing(BasicType type, int vals, const Type*& elemtype) {
-  Node *idx   = peek(0+vals);   // Get from stack without popping
-  Node *ary   = peek(1+vals);   // in case of exception
+void Parse::array_access_preprocess(int idx_depth, const Type*& elemtype) {
+  Node* idx = peek(idx_depth);
+  Node* ary = peek(idx_depth + 1);   // in case of exception
 
   // Null check the array base, with correct stack contents
   ary = null_check(ary, T_ARRAY);
   // Compile-time detect of null-exception?
-  if (stopped())  return top();
+  if (stopped()) {
+    return;
+  }
 
-  const TypeAryPtr* arytype  = _gvn.type(ary)->is_aryptr();
-  const TypeInt*    sizetype = arytype->size();
+  const TypeAryPtr* arytype = _gvn.type(ary)->is_aryptr();
   elemtype = arytype->elem();
 
   if (UseUniqueSubclasses) {
@@ -362,26 +369,18 @@ Node* Parse::array_addressing(BasicType type, int vals, const Type*& elemtype) {
     uncommon_trap(Deoptimization::Reason_unloaded,
                   Deoptimization::Action_reinterpret,
                   klass, "!loaded array");
-    return top();
+    return;
   }
 
   ary = create_speculative_inline_type_array_checks(ary, arytype, elemtype);
+  arytype = _gvn.type(ary)->is_aryptr();
+  const TypeInt* sizetype = arytype->size();
 
   if (needs_range_check(sizetype, idx)) {
     create_range_check(idx, ary, sizetype);
   } else if (C->log() != nullptr) {
     C->log()->elem("observe that='!need_range_check'");
   }
-
-  // Check for always knowing you are throwing a range-check exception
-  if (stopped())  return top();
-
-  // Make array address computation control dependent to prevent it
-  // from floating above the range check during loop optimizations.
-  Node* ptr = array_element_address(ary, idx, type, sizetype, control());
-  assert(ptr != top(), "top should go hand-in-hand with stopped");
-
-  return ptr;
 }
 
 // Check if we need a range check for an array access. This is the case if the index is either negative or if it could

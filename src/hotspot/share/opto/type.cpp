@@ -5114,15 +5114,15 @@ const TypeAryPtr* TypeAryPtr::update_properties(const TypeAryPtr* from) const {
 }
 
 jint TypeAryPtr::flat_layout_helper() const {
-  return klass()->as_flat_array_klass()->layout_helper();
+  return exact_klass()->as_flat_array_klass()->layout_helper();
 }
 
 int TypeAryPtr::flat_elem_size() const {
-  return klass()->as_flat_array_klass()->element_byte_size();
+  return exact_klass()->as_flat_array_klass()->element_byte_size();
 }
 
 int TypeAryPtr::flat_log_elem_size() const {
-  return klass()->as_flat_array_klass()->log2_element_size();
+  return exact_klass()->as_flat_array_klass()->log2_element_size();
 }
 
 //------------------------------cast_to_stable---------------------------------
@@ -6685,14 +6685,7 @@ ciKlass* TypeAryPtr::compute_klass() const {
   }
 
   // Get element klass
-  if (is_flat() && el->is_inlinetypeptr()) {
-    // Klass is required by TypeAryPtr::flat_layout_helper() and others
-    if (el->inline_klass() != nullptr) {
-      // TODO 8350865 We assume atomic if the atomic layout is available, use is_atomic() here
-      bool atomic = is_null_free() ? el->inline_klass()->has_atomic_layout() : el->inline_klass()->has_nullable_atomic_layout();
-      k_ary = ciArrayKlass::make(el->inline_klass(), is_null_free(), atomic, true);
-    }
-  } else if ((tinst = el->isa_instptr()) != nullptr) {
+  if ((tinst = el->isa_instptr()) != nullptr) {
     // Leave k_ary at nullptr.
   } else if ((tary = el->isa_aryptr()) != nullptr) {
     // Leave k_ary at nullptr.
